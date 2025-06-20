@@ -251,7 +251,7 @@ k3s-puppet/
 ### Installation Issues
 
 #### curl Command Failures
-If you encounter errors like `'curl -sfL https://get.k3s.io | sh -' returned 1`, the module automatically uses `wget` as a fallback. This is handled transparently, but you can force the binary installation method if needed:
+If you encounter errors like `'curl -sfL https://get.k3s.io | sh -' returned 1`, the module automatically installs `wget` and `curl` packages and uses `wget` as the primary method with `curl` as a fallback. This is handled transparently, but you can force the binary installation method if needed:
 
 ```puppet
 class { 'k3s_cluster':
@@ -259,6 +259,9 @@ class { 'k3s_cluster':
   installation_method => 'binary',  # Use binary instead of script
 }
 ```
+
+#### Missing wget/curl Packages
+The module automatically installs `wget` and `curl` packages before attempting to download the K3S installation script. This resolves issues on minimal OS installations where these tools might not be pre-installed.
 
 #### Directory Permission Issues
 If you see "Cannot create /etc/rancher/k3s; parent directory /etc/rancher does not exist", ensure you're using the latest version of the module. This issue was resolved in recent versions.
@@ -312,6 +315,11 @@ vagrant ssh
 ### Puppet Modules
 - **puppetlabs/stdlib** (>= 6.0.0)
 - **puppet/archive** (>= 4.0.0) - For binary installations
+
+### System Packages
+The module automatically installs these packages if not present:
+- **wget** - Primary tool for downloading K3S installation script
+- **curl** - Fallback tool for downloading K3S installation script
 
 ### System Requirements
 - **Memory**: Minimum 512MB, recommended 1GB+
