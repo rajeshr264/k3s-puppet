@@ -39,13 +39,23 @@ class k3s_cluster::install {
 
   case $k3s_cluster::installation_method {
     'script': {
-      # Download the K3S installation script using wget
+      # Ensure wget is installed (preferred method)
+      package { 'wget':
+        ensure => installed,
+      }
+
+      # Also ensure curl is available as fallback
+      package { 'curl':
+        ensure => installed,
+      }
+
+      # Download the K3S installation script using wget (with curl fallback)
       exec { 'download_k3s_script':
-        command => "wget -O /tmp/k3s-install.sh ${k3s_cluster::params::install_script_url}",
+        command => "wget -O /tmp/k3s-install.sh ${k3s_cluster::params::install_script_url} || curl -sfL ${k3s_cluster::params::install_script_url} -o /tmp/k3s-install.sh",
         path    => ['/usr/bin', '/bin', '/usr/local/bin'],
         creates => '/tmp/k3s-install.sh',
         timeout => 60,
-        require => File[$k3s_cluster::params::config_dir],
+        require => [File[$k3s_cluster::params::config_dir], Package['wget'], Package['curl']],
       }
 
       # Make the script executable
