@@ -1,0 +1,239 @@
+#!/bin/bash
+# K3S Cluster Information Collection Script
+# This script collects cluster information from exported resources
+# for automated agent node deployment.
+
+set -e
+
+CLUSTER_NAME="<%= $cluster_name %>"
+TOKEN_TIMEOUT="<%= $token_timeout %>"
+WAIT_FOR_TOKEN="<%= $wait_for_token %>"
+
+echo "=== K3S Cluster Information Collection ==="
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Token Timeout: $TOKEN_TIMEOUT seconds"
+echo "Wait for Token: $WAIT_FOR_TOKEN"
+echo "============================================"
+
+# Function to log messages with timestamp
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Function to find and process cluster information files
+find_cluster_info() {
+    local found_files=()
+    local yaml_files=()
+    local script_files=()
+    
+    # Look for both YAML and shell script formats
+    yaml_files=($(find /tmp -name "k3s_cluster_info_${CLUSTER_NAME}_*.yaml" 2>/dev/null | head -5))
+    script_files=($(find /tmp -name "k3s_cluster_info_${CLUSTER_NAME}_*.sh" 2>/dev/null | head -5))
+    
+    # Prefer YAML files if available
+    if [ ${#yaml_files[@]} -gt 0 ]; then
+        found_files=("${yaml_files[@]}")
+        log_message "Found ${#found_files[@]} YAML cluster info file(s)"
+    elif [ ${#script_files[@]} -gt 0 ]; then
+        found_files=("${script_files[@]}")
+        log_message "Found ${#found_files[@]} shell script cluster info file(s)"
+    fi
+    
+    echo "${found_files[@]}"
+}
+
+# Function to process YAML cluster information
+process_yaml_info() {
+    local yaml_file="$1"
+    log_message "Processing YAML cluster info: $yaml_file"
+    
+    # Use Python to parse YAML if available, otherwise use basic parsing
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import yaml
+import sys
+
+try:
+    with open('$yaml_file', 'r') as f:
+        data = yaml.safe_load(f)
+    
+    # Extract required information
+    cluster_name = data.get('cluster_name', '')
+    server_fqdn = data.get('server_fqdn', '')
+    server_ip = data.get('server_ip', '')
+    server_url = data.get('server_url', '')
+    server_node = data.get('server_node', '')
+    is_primary = data.get('is_primary', False)
+    node_token = data.get('node_token', '')
+    export_time = data.get('export_time', '')
+    
+    # Validate required fields
+    if not all([cluster_name, server_fqdn, server_url, node_token]):
+        print('ERROR: Missing required cluster information')
+        sys.exit(1)
+    
+    # Output the information
+    print(f'K3S_CLUSTER_NAME={cluster_name}')
+    print(f'K3S_SERVER_FQDN={server_fqdn}')
+    print(f'K3S_SERVER_IP={server_ip}')
+    print(f'K3S_SERVER_URL={server_url}')
+    print(f'K3S_SERVER_NODE={server_node}')
+    print(f'K3S_IS_PRIMARY={is_primary}')
+    print(f'K3S_NODE_TOKEN={node_token}')
+    print(f'K3S_EXPORT_TIME={export_time}')
+    
+except Exception as e:
+    print(f'ERROR: Failed to parse YAML: {e}')
+    sys.exit(1)
+"
+    else
+        # Fallback to basic grep-based parsing
+        log_message "Python not available, using basic parsing"
+        grep -E "^(cluster_name|server_fqdn|server_ip|server_url|server_node|is_primary|node_token|export_time):" "$yaml_file" | \
+        sed 's/: /=/' | sed 's/^/K3S_/' | tr '[:lower:]' '[:upper:]' | sed 's/K3S_CLUSTER_NAME/K3S_CLUSTER_NAME/' | \
+        sed 's/K3S_SERVER_/K3S_SERVER_/' | sed 's/K3S_NODE_TOKEN/K3S_NODE_TOKEN/' | sed 's/K3S_IS_PRIMARY/K3S_IS_PRIMARY/' | \
+        sed 's/K3S_EXPORT_TIME/K3S_EXPORT_TIME/'
+    fi
+}
+
+# Function to process shell script cluster information
+process_script_info() {
+    local script_file="$1"
+    log_message "Processing shell script cluster info: $script_file"
+    
+    # Source the script to get environment variables
+    if [ -r "$script_file" ]; then
+        source "$script_file"
+        
+        # Output the variables
+        echo "K3S_CLUSTER_NAME=$K3S_CLUSTER_NAME"
+        echo "K3S_SERVER_FQDN=$K3S_SERVER_FQDN"
+        echo "K3S_SERVER_IP=$K3S_SERVER_IP"
+        echo "K3S_SERVER_URL=$K3S_SERVER_URL"
+        echo "K3S_SERVER_NODE=$K3S_SERVER_NODE"
+        echo "K3S_IS_PRIMARY=$K3S_IS_PRIMARY"
+        echo "K3S_NODE_TOKEN=$K3S_NODE_TOKEN"
+        echo "K3S_EXPORT_TIME=$K3S_EXPORT_TIME"
+    else
+        log_message "ERROR: Cannot read script file $script_file"
+        return 1
+    fi
+}
+
+# Function to create facts file from collected information
+create_facts_file() {
+    local cluster_vars="$1"
+    
+    log_message "Creating Puppet facts file"
+    
+    # Parse the collected variables
+    eval "$cluster_vars"
+    
+    # Validate required variables
+    if [ -z "$K3S_CLUSTER_NAME" ] || [ -z "$K3S_SERVER_URL" ] || [ -z "$K3S_NODE_TOKEN" ]; then
+        log_message "ERROR: Missing required cluster information"
+        log_message "Cluster Name: $K3S_CLUSTER_NAME"
+        log_message "Server URL: $K3S_SERVER_URL"
+        log_message "Token: ${K3S_NODE_TOKEN:0:10}..."
+        return 1
+    fi
+    
+    # Create the facts file
+    cat > /etc/facter/facts.d/k3s_cluster_info.yaml << EOF
+---
+k3s_cluster_name: "${K3S_CLUSTER_NAME}"
+k3s_server_fqdn: "${K3S_SERVER_FQDN}"
+k3s_server_ip: "${K3S_SERVER_IP}"
+k3s_server_url: "${K3S_SERVER_URL}"
+k3s_server_node: "${K3S_SERVER_NODE}"
+k3s_is_primary: ${K3S_IS_PRIMARY}
+k3s_node_token: "${K3S_NODE_TOKEN}"
+k3s_token_collected: true
+k3s_collection_timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+k3s_export_time: "${K3S_EXPORT_TIME}"
+EOF
+    
+    log_message "Facts file created successfully"
+    log_message "Cluster: $K3S_CLUSTER_NAME"
+    log_message "Server: $K3S_SERVER_URL"
+    log_message "Token collected: ${#K3S_NODE_TOKEN} characters"
+    
+    return 0
+}
+
+# Main collection logic
+main() {
+    log_message "Starting cluster information collection for '$CLUSTER_NAME'"
+    
+    local timeout_count=0
+    local max_attempts=$((TOKEN_TIMEOUT / 5))
+    local cluster_info_collected=false
+    
+    while [ $timeout_count -lt $max_attempts ] && [ "$cluster_info_collected" = false ]; do
+        log_message "Collection attempt $((timeout_count + 1))/$max_attempts"
+        
+        # Find available cluster information files
+        local info_files=($(find_cluster_info))
+        
+        if [ ${#info_files[@]} -gt 0 ]; then
+            log_message "Found cluster information files: ${info_files[*]}"
+            
+            # Process the first available file
+            local info_file="${info_files[0]}"
+            local cluster_vars=""
+            
+            if [[ "$info_file" == *.yaml ]]; then
+                cluster_vars=$(process_yaml_info "$info_file")
+            elif [[ "$info_file" == *.sh ]]; then
+                cluster_vars=$(process_script_info "$info_file")
+            else
+                log_message "ERROR: Unsupported file format: $info_file"
+                continue
+            fi
+            
+            # Check if we got valid information
+            if [ $? -eq 0 ] && [ -n "$cluster_vars" ]; then
+                log_message "Successfully processed cluster information"
+                
+                # Create the facts file
+                if create_facts_file "$cluster_vars"; then
+                    cluster_info_collected=true
+                    log_message "Cluster information collection completed successfully"
+                    break
+                else
+                    log_message "Failed to create facts file, retrying..."
+                fi
+            else
+                log_message "Failed to process cluster information, retrying..."
+            fi
+        else
+            log_message "No cluster information files found, waiting..."
+        fi
+        
+        if [ "$cluster_info_collected" = false ]; then
+            if [ "$WAIT_FOR_TOKEN" = "true" ]; then
+                log_message "Waiting 5 seconds before next attempt..."
+                sleep 5
+                timeout_count=$((timeout_count + 1))
+            else
+                log_message "wait_for_token is false, not waiting for token collection"
+                break
+            fi
+        fi
+    done
+    
+    if [ "$cluster_info_collected" = false ]; then
+        if [ "$WAIT_FOR_TOKEN" = "true" ]; then
+            log_message "ERROR: Failed to collect cluster information within timeout period"
+            exit 1
+        else
+            log_message "WARNING: Cluster information not found, but wait_for_token is false"
+            exit 0
+        fi
+    fi
+    
+    log_message "Cluster information collection completed successfully"
+}
+
+# Run the main function
+main "$@" 
