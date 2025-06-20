@@ -5,6 +5,9 @@
 
 set -e
 
+# Get the directory where this script is located
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Configuration - can be overridden with environment variables
 readonly AWS_REGION="${AWS_REGION:-us-west-2}"
 readonly INSTANCE_TYPE="${INSTANCE_TYPE:-t3.medium}"
@@ -116,10 +119,10 @@ test_single_node() {
     fi
     
     # Create Ruby script for testing
-    cat > /tmp/k3s_single_test.rb << 'EOF'
+    cat > /tmp/k3s_single_test.rb << EOF
 #!/usr/bin/env ruby
 
-require_relative '../ec2-scripts/aws_ec2_testing'
+require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 def main
   os_list = ARGV
@@ -197,10 +200,10 @@ test_multi_node() {
     log "Testing multi-node deployment with mixed operating systems"
     
     # Create Ruby script for multi-node testing
-    cat > /tmp/k3s_multi_test.rb << 'EOF'
+    cat > /tmp/k3s_multi_test.rb << EOF
 #!/usr/bin/env ruby
 
-require_relative '../ec2-scripts/aws_ec2_testing'
+require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 def main
   testing = AwsEc2K3sTesting.new
@@ -270,10 +273,10 @@ EOF
 list_instances() {
     log "Listing all K3S test instances..."
     
-    cat > /tmp/k3s_list.rb << 'EOF'
+    cat > /tmp/k3s_list.rb << EOF
 #!/usr/bin/env ruby
 
-require_relative '../ec2-scripts/aws_ec2_testing'
+require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 testing = AwsEc2K3sTesting.new
 testing.list_test_instances
@@ -287,10 +290,10 @@ EOF
 cleanup_all() {
     log "Cleaning up all K3S test resources..."
     
-    cat > /tmp/k3s_cleanup.rb << 'EOF'
+    cat > /tmp/k3s_cleanup.rb << EOF
 #!/usr/bin/env ruby
 
-require_relative '../ec2-scripts/aws_ec2_testing'
+require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 # Find all test instances and clean them up
 begin
@@ -333,10 +336,10 @@ EOF
 generate_report() {
     log "Generating test report for recent test sessions..."
     
-    cat > /tmp/k3s_report.rb << 'EOF'
+    cat > /tmp/k3s_report.rb << EOF
 #!/usr/bin/env ruby
 
-require_relative '../ec2-scripts/aws_ec2_testing'
+require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 # This would typically read from stored test results
 # For now, just show current instance status

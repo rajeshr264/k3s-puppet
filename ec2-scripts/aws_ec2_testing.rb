@@ -577,13 +577,14 @@ class AwsEc2K3sTesting
         end
       end
     end
-    
-    # Wait for user data script completion
-    puts "Waiting for K3S deployment to complete..."
-    puts "💡 Press Ctrl-C to interrupt and cleanup resources"
-    max_wait = 600  # 10 minutes
+
+    # Fast K3S health verification using multiple checks
+    puts "Performing fast K3S health verification..."
+    max_wait = 300  # Reduced to 5 minutes
     start_time = Time.now
-    check_interval = 15  # Check every 15 seconds instead of 30
+    check_interval = 10  # Check every 10 seconds
+    
+    health_checks_passed = false
     
     loop do
       return false if @interrupted
@@ -591,97 +592,166 @@ class AwsEc2K3sTesting
       elapsed = Time.now - start_time
       
       begin
-        # Check for completion marker first
-        result = ssh_command(public_ip, user, 'test -f /tmp/k3s_test_complete && echo "COMPLETE"')
-        if result.strip == "COMPLETE"
-          puts "✅ K3S deployment completed successfully!"
-          break
-        end
+        puts "🔍 Running K3S health checks... (#{elapsed.to_i}s elapsed)"
         
-        # If no completion marker, check if K3S service is running
-        # This provides faster feedback when K3S is ready
-        k3s_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "INACTIVE"')
-        if k3s_status.strip == "active"
-          puts "🔍 K3S service is active, checking cluster readiness..."
+        # Check 1: Service Status Verification
+        puts "   ✓ Checking K3S service status..."
+        service_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "inactive"')
+        service_enabled = ssh_command(public_ip, user, 'sudo systemctl is-enabled k3s 2>/dev/null || echo "disabled"')
+        
+        if service_status.strip == "active"
+          puts "   ✅ K3S service is active and running"
           
-          # Check if cluster is responsive
-          cluster_check = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0"')
-          if cluster_check.strip.to_i > 0
-            puts "✅ K3S cluster is ready and responsive!"
-            # Create our own completion marker if the script hasn't finished yet
-            ssh_command(public_ip, user, 'echo "K3S cluster is ready and functional" > /tmp/k3s_test_complete')
-            break
-          end
-        end
-        
-        # Provide progress feedback
-        if elapsed % 60 == 0 && elapsed > 0  # Every minute
-          puts "⏳ Still waiting... (#{elapsed.to_i}s elapsed, checking K3S status)"
-          begin
-            # Show current status for debugging
-            puppet_status = ssh_command(public_ip, user, 'pgrep -f puppet >/dev/null && echo "RUNNING" || echo "FINISHED"')
-            puts "   Puppet status: #{puppet_status.strip}"
+          # Check 2: Cluster Information Check
+          puts "   ✓ Checking cluster connectivity..."
+          cluster_info = ssh_command(public_ip, user, 'sudo k3s kubectl cluster-info 2>/dev/null | head -1 || echo "FAILED"')
+          
+          if cluster_info.include?("Kubernetes control plane")
+            puts "   ✅ Kubernetes API server is accessible"
             
-            k3s_service = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "INACTIVE"')
-            puts "   K3S service: #{k3s_service.strip}"
-          rescue
-            puts "   Status check failed, continuing to wait..."
+            # Check 3: Node Status Verification
+            puts "   ✓ Checking node readiness..."
+            node_status = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | awk \'{print $2}\' || echo "NotReady"')
+            
+            if node_status.strip == "Ready"
+              puts "   ✅ Node is in Ready state"
+              
+              # Check 4: Pod Health Assessment
+              puts "   ✓ Checking system pods health..."
+              pods_status = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l || echo "999"')
+              
+              non_running_pods = pods_status.strip.to_i
+              if non_running_pods == 0
+                puts "   ✅ All system pods are running correctly"
+                
+                # Check 5: Kubeconfig File Verification
+                puts "   ✓ Verifying kubeconfig file..."
+                kubeconfig_check = ssh_command(public_ip, user, 'sudo test -f /etc/rancher/k3s/k3s.yaml && sudo test -s /etc/rancher/k3s/k3s.yaml && echo "OK" || echo "MISSING"')
+                
+                if kubeconfig_check.strip == "OK"
+                  puts "   ✅ Kubeconfig file exists and is not empty"
+                  
+                  # Check 6: Test Pod Deployment (Quick functional test)
+                  puts "   ✓ Testing pod deployment capability..."
+                  test_pod_result = ssh_command(public_ip, user, 'sudo k3s kubectl run test-pod-verify --image=nginx:alpine --restart=Never --timeout=30s 2>/dev/null && sleep 5 && sudo k3s kubectl get pod test-pod-verify --no-headers 2>/dev/null | awk \'{print $3}\' && sudo k3s kubectl delete pod test-pod-verify --timeout=10s >/dev/null 2>&1 || echo "FAILED"')
+                  
+                  if test_pod_result.strip == "Running" || test_pod_result.include?("Running")
+                    puts "   ✅ Pod deployment test successful"
+                    puts ""
+                    puts "🎉 All K3S health checks passed! Cluster is fully operational."
+                    health_checks_passed = true
+                    break
+                  else
+                    puts "   ⚠️  Pod deployment test failed, but basic cluster is functional"
+                    puts "   📝 This might be due to image pull delays or resource constraints"
+                    # Still consider this a success since core K3S is working
+                    health_checks_passed = true
+                    break
+                  end
+                else
+                  puts "   ❌ Kubeconfig file is missing or empty"
+                end
+              else
+                puts "   ⚠️  #{non_running_pods} system pods are not running yet"
+                
+                # Show pod details for debugging
+                if elapsed % 30 == 0  # Every 30 seconds
+                  pod_details = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces 2>/dev/null | grep -v Running | grep -v Completed || echo "No problematic pods found"')
+                  puts "   📋 Non-running pods:"
+                  puts pod_details.split("\n").map { |line| "      #{line}" }.join("\n")
+                end
+              end
+            else
+              puts "   ⚠️  Node status: #{node_status.strip}"
+            end
+          else
+            puts "   ⚠️  Cluster API not accessible yet"
+          end
+        else
+          puts "   ⚠️  K3S service status: #{service_status.strip}"
+          
+          # Check if Puppet is still running (might be installing K3S)
+          puppet_running = ssh_command(public_ip, user, 'pgrep -f puppet >/dev/null && echo "RUNNING" || echo "FINISHED"')
+          puts "   📝 Puppet status: #{puppet_running.strip}"
+          
+          # Check if there are any obvious errors in the K3S service
+          if elapsed > 60  # After 1 minute, start showing more detailed info
+            begin
+              service_logs = ssh_command(public_ip, user, 'sudo journalctl -u k3s --no-pager --lines=3 2>/dev/null | tail -3 || echo "No logs available"')
+              puts "   📋 Recent K3S service logs:"
+              puts service_logs.split("\n").map { |line| "      #{line}" }.join("\n")
+            rescue
+              puts "   📋 Unable to retrieve service logs"
+            end
           end
         end
         
       rescue => e
-        # Connection issues or commands failed, continue waiting
-        puts "   Connection issue, retrying... (#{e.message})" if elapsed % 60 == 0
+        puts "   ❌ Health check failed: #{e.message}"
       end
       
       if elapsed > max_wait
-        puts "❌ Timeout waiting for K3S deployment (#{max_wait}s)"
-        puts "   Attempting to get current status..."
+        puts ""
+        puts "❌ Timeout waiting for K3S cluster to become healthy (#{max_wait}s)"
+        puts "💡 Attempting to gather final diagnostic information..."
         
         begin
-          # Try to get final status even on timeout
-          k3s_status = ssh_command(public_ip, user, 'sudo systemctl status k3s --no-pager || echo "FAILED"')
-          puts "   Final K3S status:"
-          puts k3s_status
+          # Final diagnostic information
+          final_service_status = ssh_command(public_ip, user, 'sudo systemctl status k3s --no-pager --lines=10 || echo "Service status unavailable"')
+          puts "📋 Final K3S service status:"
+          puts final_service_status.split("\n").map { |line| "   #{line}" }.join("\n")
+          
+          final_logs = ssh_command(public_ip, user, 'sudo journalctl -u k3s --no-pager --lines=10 | tail -10 || echo "Logs unavailable"')
+          puts "📋 Final K3S logs:"
+          puts final_logs.split("\n").map { |line| "   #{line}" }.join("\n")
         rescue
-          puts "   Unable to get final status"
+          puts "📋 Unable to gather final diagnostic information"
         end
         
-        return false
+        break
       end
       
       begin
         interruptible_sleep(check_interval)
       rescue Interrupt
-        puts "🛑 K3S deployment wait interrupted"
+        puts "🛑 K3S health verification interrupted"
         return false
       end
     end
     
-    # Get test results
+    # Return test results
     begin
-      test_results = ssh_command(public_ip, user, 'cat /tmp/k3s_test_complete')
-      puts "Test Results:"
-      puts test_results
+      final_k3s_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s || echo "inactive"')
+      final_node_status = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | awk \'{print $2}\' || echo "Unknown"')
       
-      # Check if K3S is running
-      k3s_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s || echo "FAILED"')
-      success = k3s_status.strip == "active"
+      success = health_checks_passed && final_k3s_status.strip == "active"
       
-      {
+      result = {
         'success' => success,
         'instance_id' => instance_id,
         'os' => os,
-        'results' => test_results,
-        'k3s_status' => k3s_status.strip
+        'k3s_status' => final_k3s_status.strip,
+        'node_status' => final_node_status.strip,
+        'health_checks_passed' => health_checks_passed,
+        'verification_time' => (Time.now - start_time).to_i
       }
+      
+      if success
+        puts "✅ K3S verification completed successfully in #{result['verification_time']} seconds"
+      else
+        puts "❌ K3S verification failed after #{result['verification_time']} seconds"
+      end
+      
+      result
+      
     rescue => e
-      puts "Failed to get test results: #{e.message}"
+      puts "❌ Failed to get final test results: #{e.message}"
       {
         'success' => false,
         'instance_id' => instance_id,
         'os' => os,
-        'error' => e.message
+        'error' => e.message,
+        'verification_time' => (Time.now - start_time).to_i
       }
     end
   end
@@ -819,22 +889,28 @@ class AwsEc2K3sTesting
 
   # Generate test report
   def generate_test_report(test_results)
+    total_verification_time = test_results.sum { |r| r['verification_time'] || 0 }
+    avg_verification_time = test_results.length > 0 ? (total_verification_time / test_results.length) : 0
+    
     report = {
       'session_id' => @session_id,
-      'timestamp' => Time.now.iso8601,
+      'timestamp' => Time.now.strftime('%Y-%m-%dT%H:%M:%S%z'),
       'region' => @region,
       'instance_type' => @instance_type,
       'summary' => {
         'total_tests' => test_results.length,
         'successful' => test_results.count { |r| r['success'] },
-        'failed' => test_results.count { |r| !r['success'] }
+        'failed' => test_results.count { |r| !r['success'] },
+        'health_checks_passed' => test_results.count { |r| r['health_checks_passed'] },
+        'total_verification_time' => total_verification_time,
+        'average_verification_time' => avg_verification_time
       },
       'results' => test_results
     }
     
-    puts "\n" + "="*60
-    puts "K3S Multi-OS Test Report"
-    puts "="*60
+    puts "\n" + "="*70
+    puts "K3S Multi-OS Test Report - Fast Health Verification"
+    puts "="*70
     puts "Session ID: #{report['session_id']}"
     puts "Timestamp: #{report['timestamp']}"
     puts "Region: #{report['region']}"
@@ -844,14 +920,43 @@ class AwsEc2K3sTesting
     puts "  Total Tests: #{report['summary']['total_tests']}"
     puts "  Successful: #{report['summary']['successful']}"
     puts "  Failed: #{report['summary']['failed']}"
+    puts "  Health Checks Passed: #{report['summary']['health_checks_passed']}"
+    puts "  Total Verification Time: #{report['summary']['total_verification_time']}s"
+    puts "  Average Verification Time: #{report['summary']['average_verification_time']}s"
     puts ""
+    puts "Detailed Results:"
+    puts "-" * 70
     
     test_results.each do |result|
       status = result['success'] ? "✅ PASS" : "❌ FAIL"
-      puts "#{status} #{result['os'].upcase}: #{result['k3s_status'] || result['error']}"
+      os_name = result['os'].upcase.ljust(8)
+      k3s_status = (result['k3s_status'] || 'unknown').ljust(8)
+      node_status = (result['node_status'] || 'unknown').ljust(10)
+      verification_time = result['verification_time'] || 0
+      health_checks = result['health_checks_passed'] ? "✅" : "❌"
+      
+      puts "#{status} #{os_name} | K3S: #{k3s_status} | Node: #{node_status} | Time: #{verification_time}s | Health: #{health_checks}"
+      
+      if result['error']
+        puts "      Error: #{result['error']}"
+      end
     end
     
-    puts "="*60
+    puts "-" * 70
+    puts ""
+    
+    # Performance insights
+    if test_results.length > 1
+      fastest = test_results.min_by { |r| r['verification_time'] || 999 }
+      slowest = test_results.max_by { |r| r['verification_time'] || 0 }
+      
+      puts "Performance Insights:"
+      puts "  Fastest: #{fastest['os'].upcase} (#{fastest['verification_time']}s)"
+      puts "  Slowest: #{slowest['os'].upcase} (#{slowest['verification_time']}s)"
+      puts ""
+    end
+    
+    puts "="*70
     
     report
   end

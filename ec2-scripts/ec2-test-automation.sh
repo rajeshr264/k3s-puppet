@@ -191,7 +191,7 @@ check_prerequisites() {
 quick_test() {
     log "Starting quick test (Ubuntu single-node)..."
     
-    local script_content=$(cat << 'EOF'
+    local script_content=$(cat << EOF
 #!/usr/bin/env ruby
 require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
