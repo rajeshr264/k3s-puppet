@@ -72,9 +72,56 @@ class AwsEc2K3sTesting
       'key_pair_name' => nil,
       'key_file_path' => nil
     }
+    @interrupted = false
+    
+    # Set up interrupt handler for graceful cleanup
+    setup_interrupt_handler
   end
 
   attr_reader :session_id, :region, :instance_type, :temp_resources
+
+  # Set up graceful interrupt handling
+  def setup_interrupt_handler
+    Signal.trap('INT') do
+      @interrupted = true
+      puts "\n🛑 Interrupt received (Ctrl-C). Initiating graceful cleanup..."
+      puts "   Please wait while we clean up AWS resources..."
+      
+      begin
+        cleanup_temp_resources
+        puts "✅ Cleanup completed successfully"
+      rescue => e
+        puts "❌ Error during cleanup: #{e.message}"
+        puts "   You may need to manually clean up resources with session ID: #{@session_id}"
+      ensure
+        puts "🔚 Exiting..."
+        exit(0)
+      end
+    end
+  end
+
+  # Check if interrupted (for use in loops)
+  def interrupted?
+    @interrupted
+  end
+
+  # Safe sleep that can be interrupted
+  def interruptible_sleep(seconds)
+    return if @interrupted
+    
+    # Sleep in smaller chunks to allow for interrupt checking
+    remaining = seconds.to_f
+    while remaining > 0 && !@interrupted
+      chunk = [remaining, 1.0].min
+      sleep(chunk)
+      remaining -= chunk
+    end
+    
+    if @interrupted
+      puts "\n⚠️  Operation interrupted by user"
+      raise Interrupt
+    end
+  end
 
   # Create temporary AWS resources for testing
   def create_temp_resources
@@ -507,6 +554,8 @@ class AwsEc2K3sTesting
     attempt = 0
     
     loop do
+      return false if @interrupted
+      
       attempt += 1
       
       begin
@@ -519,17 +568,26 @@ class AwsEc2K3sTesting
           return false
         end
         puts "SSH attempt #{attempt}/#{max_attempts} failed, retrying in 10 seconds..."
-        sleep 10
+        
+        begin
+          interruptible_sleep(10)
+        rescue Interrupt
+          puts "🛑 SSH connection attempts interrupted"
+          return false
+        end
       end
     end
     
     # Wait for user data script completion
     puts "Waiting for K3S deployment to complete..."
+    puts "💡 Press Ctrl-C to interrupt and cleanup resources"
     max_wait = 600  # 10 minutes
     start_time = Time.now
     check_interval = 15  # Check every 15 seconds instead of 30
     
     loop do
+      return false if @interrupted
+      
       elapsed = Time.now - start_time
       
       begin
@@ -592,7 +650,12 @@ class AwsEc2K3sTesting
         return false
       end
       
-      sleep check_interval
+      begin
+        interruptible_sleep(check_interval)
+      rescue Interrupt
+        puts "🛑 K3S deployment wait interrupted"
+        return false
+      end
     end
     
     # Get test results

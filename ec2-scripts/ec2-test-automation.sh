@@ -17,6 +17,35 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
+# Global variables for cleanup
+RUBY_PID=""
+TEMP_SCRIPT=""
+
+# Interrupt handler for graceful cleanup
+cleanup_on_interrupt() {
+    echo ""
+    echo -e "${YELLOW}🛑 Interrupt received (Ctrl-C). Initiating cleanup...${NC}"
+    
+    # Kill Ruby process if running
+    if [[ -n "$RUBY_PID" ]] && kill -0 "$RUBY_PID" 2>/dev/null; then
+        echo -e "${BLUE}   Terminating Ruby test process...${NC}"
+        kill -INT "$RUBY_PID" 2>/dev/null || true
+        wait "$RUBY_PID" 2>/dev/null || true
+    fi
+    
+    # Clean up temporary script
+    if [[ -n "$TEMP_SCRIPT" ]] && [[ -f "$TEMP_SCRIPT" ]]; then
+        rm -f "$TEMP_SCRIPT"
+    fi
+    
+    echo -e "${GREEN}✅ Cleanup completed${NC}"
+    echo -e "${BLUE}🔚 Exiting...${NC}"
+    exit 130  # Standard exit code for Ctrl-C
+}
+
+# Set up interrupt trap
+trap cleanup_on_interrupt INT TERM
+
 # Logging functions
 log() {
     echo -e "${BLUE}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
@@ -32,6 +61,34 @@ error() {
 
 success() {
     echo -e "${GREEN}[SUCCESS]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# Run Ruby script with interrupt handling
+run_ruby_script() {
+    local script_content="$1"
+    local script_name="$2"
+    
+    TEMP_SCRIPT="/tmp/k3s_${script_name}_test.rb"
+    
+    # Write script content to temporary file
+    echo "$script_content" > "$TEMP_SCRIPT"
+    
+    # Run Ruby script in background to capture PID
+    ruby "$TEMP_SCRIPT" &
+    RUBY_PID=$!
+    
+    # Wait for Ruby script to complete
+    local exit_code=0
+    if ! wait "$RUBY_PID"; then
+        exit_code=$?
+    fi
+    
+    # Clean up
+    RUBY_PID=""
+    rm -f "$TEMP_SCRIPT"
+    TEMP_SCRIPT=""
+    
+    return $exit_code
 }
 
 # Show usage
@@ -134,7 +191,7 @@ check_prerequisites() {
 quick_test() {
     log "Starting quick test (Ubuntu single-node)..."
     
-    cat > /tmp/k3s_quick_test.rb << EOF
+    local script_content=$(cat << 'EOF'
 #!/usr/bin/env ruby
 require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
@@ -162,25 +219,22 @@ end
 
 exit(test_results.any? { |r| !r['success'] } ? 1 : 0)
 EOF
+)
     
-    ruby /tmp/k3s_quick_test.rb
-    local exit_code=$?
-    rm -f /tmp/k3s_quick_test.rb
-    
-    if [[ $exit_code -eq 0 ]]; then
+    if run_ruby_script "$script_content" "quick"; then
         success "Quick test completed successfully"
+        return 0
     else
         error "Quick test failed"
+        return 1
     fi
-    
-    return $exit_code
 }
 
 # Full test - all supported operating systems
 full_test() {
     log "Starting full test (all supported operating systems)..."
     
-    cat > /tmp/k3s_full_test.rb << EOF
+    local script_content=$(cat << 'EOF'
 #!/usr/bin/env ruby
 require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
@@ -236,18 +290,15 @@ failed_tests = test_results.count { |r| !r['success'] }
 puts "\nFinal Results: #{test_results.count { |r| r['success'] }} passed, #{failed_tests} failed"
 exit(failed_tests > 0 ? 1 : 0)
 EOF
+)
     
-    ruby /tmp/k3s_full_test.rb
-    local exit_code=$?
-    rm -f /tmp/k3s_full_test.rb
-    
-    if [[ $exit_code -eq 0 ]]; then
+    if run_ruby_script "$script_content" "full"; then
         success "Full test completed successfully"
+        return 0
     else
         error "Full test completed with failures"
+        return 1
     fi
-    
-    return $exit_code
 }
 
 # Multi-node test
@@ -313,17 +364,7 @@ puts "\nMulti-Node Results: #{test_results.count { |r| r['success'] }} passed, #
 exit(failed_tests > 0 ? 1 : 0)
 EOF
     
-    ruby /tmp/k3s_multi_node_test.rb
-    local exit_code=$?
-    rm -f /tmp/k3s_multi_node_test.rb
-    
-    if [[ $exit_code -eq 0 ]]; then
-        success "Multi-node test completed successfully"
-    else
-        error "Multi-node test completed with failures"
-    fi
-    
-    return $exit_code
+    run_ruby_script "$(cat /tmp/k3s_multi_node_test.rb)" multi_node_test
 }
 
 # Performance test
@@ -397,17 +438,7 @@ failed_tests = test_results.count { |r| !r['success'] }
 exit(failed_tests > 0 ? 1 : 0)
 EOF
     
-    ruby /tmp/k3s_performance_test.rb
-    local exit_code=$?
-    rm -f /tmp/k3s_performance_test.rb
-    
-    if [[ $exit_code -eq 0 ]]; then
-        success "Performance test completed successfully"
-    else
-        error "Performance test completed with failures"
-    fi
-    
-    return $exit_code
+    run_ruby_script "$(cat /tmp/k3s_performance_test.rb)" performance_test
 }
 
 # Cleanup all resources
@@ -460,6 +491,8 @@ K3S EC2 Test Automation
 Region: $AWS_REGION
 Instance Type: $INSTANCE_TYPE
 Command: ${COMMAND:-help}
+
+💡 Press Ctrl-C at any time to interrupt and cleanup AWS resources
 
 EOF
     
