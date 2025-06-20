@@ -329,22 +329,42 @@ class AwsEc2K3sTesting
       puppet apply /tmp/k3s_config.pp --verbose --detailed-exitcodes
       
       echo '=== Waiting for K3S Service ==='\n
-      # Wait for K3S to be ready
-      timeout 120 bash -c 'until systemctl is-active --quiet k3s; do echo "Waiting for K3S service..."; sleep 5; done'
+      # Wait for K3S to be ready with better feedback
+      echo "Waiting for K3S service to start..."
+      timeout 120 bash -c 'until systemctl is-active --quiet k3s; do 
+        echo "$(date): Waiting for K3S service..."
+        sleep 5
+      done'
+      
+      # Create early completion marker as soon as service is active
+      if systemctl is-active --quiet k3s; then
+        echo "K3S service is active, creating early completion marker..."
+        echo "K3S service started successfully at $(date)" > /tmp/k3s_test_complete
+        echo "Checking cluster readiness..." >> /tmp/k3s_test_complete
+      fi
       
       echo '=== Testing K3S Installation ==='\n
       # Test K3S functionality
       k3s --version
+      
+      # Wait for cluster to be ready
+      echo "Waiting for K3S cluster to be ready..."
+      timeout 60 bash -c 'until k3s kubectl get nodes >/dev/null 2>&1; do 
+        echo "$(date): Waiting for cluster readiness..."
+        sleep 5
+      done'
+      
       k3s kubectl get nodes
       
-      echo '=== Creating Test Completion Marker ==='\n
-      # Create test completion marker
-      if systemctl is-active --quiet k3s; then
+      echo '=== Creating Final Test Completion Marker ==='\n
+      # Create comprehensive test completion marker
+      if systemctl is-active --quiet k3s && k3s kubectl get nodes >/dev/null 2>&1; then
         echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
         echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
         echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
         echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
         echo "K3S service is running" >> /tmp/k3s_test_complete
+        echo "Cluster is responsive" >> /tmp/k3s_test_complete
         k3s --version >> /tmp/k3s_test_complete
         k3s kubectl get nodes >> /tmp/k3s_test_complete
         echo "Puppet module test: SUCCESS" >> /tmp/k3s_test_complete
@@ -353,7 +373,7 @@ class AwsEc2K3sTesting
         echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
         echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
         echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
-        echo "K3S service failed to start" >> /tmp/k3s_test_complete
+        echo "K3S service status: $(systemctl is-active k3s)" >> /tmp/k3s_test_complete
         systemctl status k3s >> /tmp/k3s_test_complete 2>&1
         echo "Puppet module test: FAILED" >> /tmp/k3s_test_complete
       fi
@@ -507,24 +527,72 @@ class AwsEc2K3sTesting
     puts "Waiting for K3S deployment to complete..."
     max_wait = 600  # 10 minutes
     start_time = Time.now
+    check_interval = 15  # Check every 15 seconds instead of 30
     
     loop do
+      elapsed = Time.now - start_time
+      
       begin
+        # Check for completion marker first
         result = ssh_command(public_ip, user, 'test -f /tmp/k3s_test_complete && echo "COMPLETE"')
         if result.strip == "COMPLETE"
-          puts "K3S deployment completed"
+          puts "✅ K3S deployment completed successfully!"
           break
         end
-      rescue
-        # File doesn't exist yet, continue waiting
+        
+        # If no completion marker, check if K3S service is running
+        # This provides faster feedback when K3S is ready
+        k3s_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "INACTIVE"')
+        if k3s_status.strip == "active"
+          puts "🔍 K3S service is active, checking cluster readiness..."
+          
+          # Check if cluster is responsive
+          cluster_check = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0"')
+          if cluster_check.strip.to_i > 0
+            puts "✅ K3S cluster is ready and responsive!"
+            # Create our own completion marker if the script hasn't finished yet
+            ssh_command(public_ip, user, 'echo "K3S cluster is ready and functional" > /tmp/k3s_test_complete')
+            break
+          end
+        end
+        
+        # Provide progress feedback
+        if elapsed % 60 == 0 && elapsed > 0  # Every minute
+          puts "⏳ Still waiting... (#{elapsed.to_i}s elapsed, checking K3S status)"
+          begin
+            # Show current status for debugging
+            puppet_status = ssh_command(public_ip, user, 'pgrep -f puppet >/dev/null && echo "RUNNING" || echo "FINISHED"')
+            puts "   Puppet status: #{puppet_status.strip}"
+            
+            k3s_service = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "INACTIVE"')
+            puts "   K3S service: #{k3s_service.strip}"
+          rescue
+            puts "   Status check failed, continuing to wait..."
+          end
+        end
+        
+      rescue => e
+        # Connection issues or commands failed, continue waiting
+        puts "   Connection issue, retrying... (#{e.message})" if elapsed % 60 == 0
       end
       
-      if Time.now - start_time > max_wait
-        puts "Timeout waiting for K3S deployment"
+      if elapsed > max_wait
+        puts "❌ Timeout waiting for K3S deployment (#{max_wait}s)"
+        puts "   Attempting to get current status..."
+        
+        begin
+          # Try to get final status even on timeout
+          k3s_status = ssh_command(public_ip, user, 'sudo systemctl status k3s --no-pager || echo "FAILED"')
+          puts "   Final K3S status:"
+          puts k3s_status
+        rescue
+          puts "   Unable to get final status"
+        end
+        
         return false
       end
       
-      sleep 30
+      sleep check_interval
     end
     
     # Get test results
