@@ -343,64 +343,14 @@ class AwsEc2K3sTesting
     end
     
     # Install K3S using Puppet module
-    script += <<~SCRIPT
+    script += <<~INSTALL_SCRIPT
       
-      echo '=== Installing Puppet 8 ==='\n
-      # Install Puppet based on OS family
-      if command -v apt-get >/dev/null 2>&1; then
-        #{install_puppet_apt(os)}
-      elif command -v dnf >/dev/null 2>&1; then
-        # Handle RPM lock issues on RHEL-based systems
-        echo "Checking for RPM locks before Puppet installation..."
-        
-        # Function to check if RPM is locked
-        check_rpm_lock() {
-            if sudo fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; then
-                return 0  # locked
-            else
-                return 1  # not locked
-            fi
-        }
-        
-        # Wait for RPM lock to be released
-        timeout=300  # 5 minutes
-        elapsed=0
-        while check_rpm_lock; do
-            if [ $elapsed -ge $timeout ]; then
-                echo "Timeout waiting for RPM lock, forcing cleanup"
-                sudo rm -f /var/lib/rpm/.rpm.lock
-                break
-            fi
-            echo "RPM database is locked, waiting... ($elapsed/$timeout seconds)"
-            sleep 10
-            elapsed=$((elapsed + 10))
-        done
-        
-        # Kill any hanging package processes
-        echo "Cleaning up any hanging package processes..."
-        sudo pkill -f "yum\\|dnf\\|rpm" 2>/dev/null || true
-        
-        # Stop SSM agent temporarily
-        sudo systemctl stop amazon-ssm-agent 2>/dev/null || true
-        sleep 5
-        
-        #{install_puppet_dnf(os)}
-        
-        # Restart SSM agent
-        sudo systemctl start amazon-ssm-agent 2>/dev/null || true
-      elif command -v zypper >/dev/null 2>&1; then
-        #{install_puppet_zypper(os)}
-      else
-        echo "ERROR: Unsupported package manager"
-        exit 1
-      fi
-      
-      echo '=== Installing Puppet Dependencies ==='\n
+      echo '=== Installing Puppet Dependencies ==='
       # Install required Puppet modules
       puppet module install puppet-archive --force
       puppet module install puppetlabs-stdlib --force
       
-      echo '=== Downloading K3S Puppet Module ==='\n
+      echo '=== Downloading K3S Puppet Module ==='
       # Create module directory
       mkdir -p /etc/puppetlabs/code/modules/k3s_cluster
       
@@ -430,51 +380,51 @@ class AwsEc2K3sTesting
         exit 1
       fi
       
-      echo '=== Applying K3S Puppet Configuration ==='\n
+      echo '=== Applying K3S Puppet Configuration ==='
       # Create Puppet manifest based on deployment type
       if [ "#{deployment_type}" = "server" ]; then
-        cat > /tmp/k3s_config.pp << 'EOF'
-        class { 'k3s_cluster':
-          ensure => 'present',
-          node_type => 'server',
-          cluster_init => true,
-          installation_method => 'script',
-          version => 'v1.33.1+k3s1',
-          cluster_name => 'k3s-test-cluster',
-          auto_token_sharing => true,
-        }
-        EOF
+        cat > /tmp/k3s_config.pp << 'PUPPET_EOF'
+class { 'k3s_cluster':
+  ensure => 'present',
+  node_type => 'server',
+  cluster_init => true,
+  installation_method => 'script',
+  version => 'v1.33.1+k3s1',
+  cluster_name => 'k3s-test-cluster',
+  auto_token_sharing => true,
+}
+PUPPET_EOF
       elif [ "#{deployment_type}" = "agent" ]; then
-        cat > /tmp/k3s_config.pp << 'EOF'
-        class { 'k3s_cluster':
-          ensure => 'present',
-          node_type => 'agent',
-          installation_method => 'script',
-          version => 'v1.33.1+k3s1',
-          cluster_name => 'k3s-test-cluster',
-          auto_token_sharing => true,
-          wait_for_token => true,
-          token_timeout => 300,
-        }
-        EOF
+        cat > /tmp/k3s_config.pp << 'PUPPET_EOF'
+class { 'k3s_cluster':
+  ensure => 'present',
+  node_type => 'agent',
+  installation_method => 'script',
+  version => 'v1.33.1+k3s1',
+  cluster_name => 'k3s-test-cluster',
+  auto_token_sharing => true,
+  wait_for_token => true,
+  token_timeout => 300,
+}
+PUPPET_EOF
       else
         # Default single node configuration
-        cat > /tmp/k3s_config.pp << 'EOF'
-        class { 'k3s_cluster':
-          ensure => 'present',
-          node_type => 'server',
-          cluster_init => true,
-          installation_method => 'script',
-          version => 'v1.33.1+k3s1',
-        }
-        EOF
+        cat > /tmp/k3s_config.pp << 'PUPPET_EOF'
+class { 'k3s_cluster':
+  ensure => 'present',
+  node_type => 'server',
+  cluster_init => true,
+  installation_method => 'script',
+  version => 'v1.33.1+k3s1',
+}
+PUPPET_EOF
       fi
       
-      echo '=== Running Puppet Apply ==='\n
+      echo '=== Running Puppet Apply ==='
       # Apply Puppet configuration with verbose output
       puppet apply /tmp/k3s_config.pp --verbose --detailed-exitcodes
       
-      echo '=== Waiting for K3S Service ==='\n
+      echo '=== Waiting for K3S Service ==='
       # Wait for K3S to be ready with better feedback
       echo "Waiting for K3S service to start..."
       timeout 120 bash -c 'until systemctl is-active --quiet k3s; do 
@@ -489,7 +439,7 @@ class AwsEc2K3sTesting
         echo "Checking cluster readiness..." >> /tmp/k3s_test_complete
       fi
       
-      echo '=== Testing K3S Installation ==='\n
+      echo '=== Testing K3S Installation ==='
       # Test K3S functionality based on node type
       k3s --version
       
@@ -506,7 +456,7 @@ class AwsEc2K3sTesting
         
         k3s kubectl get nodes
         
-        echo '=== Creating Final Test Completion Marker ==='\n
+        echo '=== Creating Final Test Completion Marker ==='
         # Create comprehensive test completion marker for server
         if systemctl is-active --quiet k3s && k3s kubectl get nodes >/dev/null 2>&1; then
           echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
@@ -533,7 +483,7 @@ class AwsEc2K3sTesting
         
         # For agent nodes, just check if the service is running
         # They don't have kubectl access
-        echo '=== Creating Final Test Completion Marker ==='\n
+        echo '=== Creating Final Test Completion Marker ==='
         if systemctl is-active --quiet k3s-agent; then
           echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
           echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
@@ -553,9 +503,9 @@ class AwsEc2K3sTesting
         fi
       fi
       
-      echo '=== K3S Puppet Module Installation Complete ==='\n
+      echo '=== K3S Puppet Module Installation Complete ==='
       date
-    SCRIPT
+INSTALL_SCRIPT
     
     script
   end
@@ -998,15 +948,35 @@ class AwsEc2K3sTesting
         '--region', @region
       ])
       
-      orphaned_data = JSON.parse(result)
-      orphaned_instances = orphaned_data.map { |inst| inst['InstanceId'] }
+      # Better error handling for JSON parsing
+      begin
+        orphaned_data = JSON.parse(result)
+        # Ensure orphaned_data is an array
+        orphaned_data = [] unless orphaned_data.is_a?(Array)
+      rescue JSON::ParserError => json_error
+        puts "   ⚠️  JSON parsing error: #{json_error.message}"
+        orphaned_data = []
+      end
+      
+      orphaned_instances = orphaned_data.map { |inst| inst['InstanceId'] }.compact
       
       if orphaned_instances.any?
         puts "   ⚠️  Found #{orphaned_instances.length} potentially orphaned instances:"
         orphaned_data.each do |inst|
-          launch_time = Time.parse(inst['LaunchTime'])
-          age_hours = ((Time.now - launch_time) / 3600).round(1)
-          puts "     - #{inst['InstanceId']} (#{inst['Name']}) - #{age_hours}h old"
+          next unless inst.is_a?(Hash) && inst['InstanceId']
+          begin
+            # Handle LaunchTime which might be a string or already parsed
+            if inst['LaunchTime']
+              launch_time_str = inst['LaunchTime'].is_a?(String) ? inst['LaunchTime'] : inst['LaunchTime'].to_s
+              launch_time = Time.parse(launch_time_str)
+              age_hours = ((Time.now - launch_time) / 3600).round(1)
+              puts "     - #{inst['InstanceId']} (#{inst['Name']}) - #{age_hours}h old"
+            else
+              puts "     - #{inst['InstanceId']} (#{inst['Name']}) - no launch time available"
+            end
+          rescue => time_error
+            puts "     - #{inst['InstanceId']} (#{inst['Name']}) - age calculation failed: #{time_error.message}"
+          end
         end
         all_instance_ids.concat(orphaned_instances)
       end
@@ -1244,7 +1214,7 @@ class AwsEc2K3sTesting
   def track_instance(instance_id, instance_info = {})
     instance_data = {
       'instance_id' => instance_id,
-      'created_at' => Time.now.iso8601,
+      'created_at' => Time.now.strftime('%Y-%m-%dT%H:%M:%S%z'),
       'session_id' => @session_id,
       'region' => @region
     }.merge(instance_info)
@@ -1259,7 +1229,7 @@ class AwsEc2K3sTesting
     tracking_data = {
       'session_id' => @session_id,
       'region' => @region,
-      'created_at' => Time.now.iso8601,
+      'created_at' => Time.now.strftime("%Y-%m-%dT%H:%M:%S%z"),
       'instances' => @created_instances
     }
     

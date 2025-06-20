@@ -46,7 +46,7 @@ class k3s_cluster::token_automation {
         exec { 'wait_for_k3s_server_ready':
           command   => "timeout ${k3s_cluster::token_timeout} bash -c 'until systemctl is-active k3s >/dev/null 2>&1 && [ -f /var/lib/rancher/k3s/server/node-token ]; do sleep 2; done'",
           path      => ['/bin', '/usr/bin'],
-          require   => Service[$k3s_cluster::params::server_service_name],
+          require   => Service[$k3s_cluster::params::service_name],
           logoutput => true,
         }
 
