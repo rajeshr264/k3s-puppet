@@ -246,6 +246,26 @@ k3s-puppet/
 └── README.md                       # This file
 ```
 
+## Troubleshooting
+
+### Installation Issues
+
+#### curl Command Failures
+If you encounter errors like `'curl -sfL https://get.k3s.io | sh -' returned 1`, the module automatically uses `wget` as a fallback. This is handled transparently, but you can force the binary installation method if needed:
+
+```puppet
+class { 'k3s_cluster':
+  ensure              => 'present',
+  installation_method => 'binary',  # Use binary instead of script
+}
+```
+
+#### Directory Permission Issues
+If you see "Cannot create /etc/rancher/k3s; parent directory /etc/rancher does not exist", ensure you're using the latest version of the module. This issue was resolved in recent versions.
+
+#### Network Connectivity
+Ensure the target nodes have internet access to download K3S binaries. For air-gapped installations, use the binary method with a local mirror.
+
 ## Testing
 
 ### Unit Tests
