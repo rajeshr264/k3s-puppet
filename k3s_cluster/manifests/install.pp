@@ -48,10 +48,14 @@ class k3s_cluster::install {
     }
 
     exec { 'handle-rpm-locks':
-      command => '/tmp/rpm-lock-handler.sh',
-      path    => ['/bin', '/usr/bin', '/sbin', '/usr/sbin'],
-      require => File['/tmp/rpm-lock-handler.sh'],
-      before  => [Package['wget'], Package['curl']],
+      command     => '/tmp/rpm-lock-handler.sh',
+      path        => ['/bin', '/usr/bin', '/sbin', '/usr/sbin'],
+      require     => File['/tmp/rpm-lock-handler.sh'],
+      before      => [Package['wget'], Package['curl']],
+      logoutput   => true,
+      timeout     => 600,  # 10 minutes timeout
+      tries       => 2,
+      try_sleep   => 30,
     }
   }
 
