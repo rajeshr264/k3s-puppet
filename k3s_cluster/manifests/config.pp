@@ -6,37 +6,24 @@
 class k3s_cluster::config {
   include k3s_cluster::params
 
-  # Create configuration directory
-  file { $k3s_cluster::params::config_dir:
-    ensure => directory,
-    mode   => '0755',
-    owner  => 'root',
-    group  => 'root',
-  }
-
-  # Create data directory
-  file { $k3s_cluster::params::data_dir:
-    ensure => directory,
-    mode   => '0755',
-    owner  => 'root',
-    group  => 'root',
-  }
+  # Configuration directory is created by k3s_cluster::install
+  # Data directory is created by k3s_cluster::install
 
   # Determine configuration based on automated token sharing
   if $k3s_cluster::auto_token_sharing and $k3s_cluster::node_type == 'agent' {
     # Agent with automated token sharing - use collected token from facts
     if $facts['k3s_server_url'] and $facts['k3s_server_token'] {
-      $final_config = $k3s_cluster::config + {
+      $final_config = $k3s_cluster::config_options + {
         'server' => $facts['k3s_server_url'],
         'token'  => $facts['k3s_server_token'],
       }
     } else {
       # Fallback to manual configuration if facts not available yet
-      $final_config = $k3s_cluster::config
+      $final_config = $k3s_cluster::config_options
     }
   } else {
     # Manual configuration or server node
-    $final_config = $k3s_cluster::config
+    $final_config = $k3s_cluster::config_options
   }
 
   # Create configuration file
@@ -46,7 +33,6 @@ class k3s_cluster::config {
     mode    => '0644',
     owner   => 'root',
     group   => 'root',
-    require => File[$k3s_cluster::params::config_dir],
     notify  => Service[$k3s_cluster::params::service_name],
   }
 
