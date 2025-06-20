@@ -1,0 +1,215 @@
+#!/bin/bash
+# K3S Network Discovery Script for Agent Nodes
+# This script discovers K3S server nodes and retrieves tokens for cluster joining
+# when storeconfigs is not available.
+
+set -e
+
+CLUSTER_NAME="<%= $cluster_name %>"
+TOKEN_TIMEOUT="<%= $token_timeout %>"
+WAIT_FOR_TOKEN="<%= $wait_for_token %>"
+
+echo "=== K3S Network Discovery for Agent Nodes ==="
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Token Timeout: $TOKEN_TIMEOUT seconds"
+echo "Wait for Token: $WAIT_FOR_TOKEN"
+echo "=============================================="
+
+# Function to log messages with timestamp
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Function to discover K3S server nodes using various methods
+discover_server_nodes() {
+    local server_candidates=()
+    
+    log_message "Starting server node discovery..."
+    
+    # Method 1: Check local network for K3S API endpoints
+    # Get the current network range
+    local current_ip=$(hostname -I | awk '{print $1}')
+    local network_base=$(echo $current_ip | cut -d. -f1-3)
+    
+    log_message "Scanning network ${network_base}.0/24 for K3S servers..."
+    
+    # Scan common K3S server ports in the local network
+    for i in {1..254}; do
+        local test_ip="${network_base}.${i}"
+        # Skip our own IP
+        if [ "$test_ip" != "$current_ip" ]; then
+            # Quick check for K3S API on port 6443
+            if timeout 2 bash -c "</dev/tcp/$test_ip/6443" 2>/dev/null; then
+                log_message "Found potential K3S server at $test_ip"
+                server_candidates+=("$test_ip")
+            fi
+        fi
+    done
+    
+    # Method 2: Check AWS EC2 metadata for instances with K3S server tags
+    if command -v curl >/dev/null 2>&1; then
+        log_message "Checking AWS EC2 metadata for server instances..."
+        
+        # Get instance metadata token
+        local token=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+        
+        if [ -n "$token" ]; then
+            # Get VPC and security group info to find related instances
+            local vpc_id=$(curl -H "X-aws-ec2-metadata-token: $token" -s http://169.254.169.254/latest/meta-data/network/interfaces/macs/$(curl -H "X-aws-ec2-metadata-token: $token" -s http://169.254.169.254/latest/meta-data/network/interfaces/macs/)/vpc-id 2>/dev/null || echo "")
+            
+            if [ -n "$vpc_id" ]; then
+                log_message "Found VPC: $vpc_id, looking for other K3S instances..."
+                # Additional AWS-specific discovery could be added here
+            fi
+        fi
+    fi
+    
+    # Method 3: DNS-based discovery (if configured)
+    local dns_server="${CLUSTER_NAME}-server"
+    if nslookup "$dns_server" >/dev/null 2>&1; then
+        local dns_ip=$(nslookup "$dns_server" | grep -A 1 "Name:" | grep "Address:" | awk '{print $2}' | head -1)
+        if [ -n "$dns_ip" ]; then
+            log_message "Found server via DNS: $dns_server -> $dns_ip"
+            server_candidates+=("$dns_ip")
+        fi
+    fi
+    
+    echo "${server_candidates[@]}"
+}
+
+# Function to test if a server is a valid K3S server and get token
+test_and_get_token() {
+    local server_ip="$1"
+    local server_url="https://${server_ip}:6443"
+    
+    log_message "Testing K3S server at $server_ip..."
+    
+    # Test if the K3S API is accessible
+    if ! timeout 10 curl -k -s "$server_url/version" >/dev/null 2>&1; then
+        log_message "Server $server_ip is not responding to K3S API requests"
+        return 1
+    fi
+    
+    log_message "Server $server_ip is responding to K3S API requests"
+    
+    # Try to get server information via SSH (if keys are configured)
+    # This is a simplified approach - in production you might use other methods
+    
+    # For EC2 instances, try to connect using the same key
+    local token=""
+    local server_fqdn=""
+    
+    # Method 1: Try to SSH and get the token directly
+    if command -v ssh >/dev/null 2>&1; then
+        log_message "Attempting SSH connection to retrieve token..."
+        
+        # Common EC2 usernames to try
+        for username in ubuntu ec2-user admin root; do
+            log_message "Trying SSH with user: $username"
+            
+            # Try SSH with a short timeout
+            if timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$username@$server_ip" "test -f /var/lib/rancher/k3s/server/node-token" 2>/dev/null; then
+                log_message "Successfully connected to $server_ip as $username"
+                
+                # Get the token
+                token=$(timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$username@$server_ip" "cat /var/lib/rancher/k3s/server/node-token" 2>/dev/null || echo "")
+                
+                if [ -n "$token" ]; then
+                    log_message "Successfully retrieved token from $server_ip"
+                    
+                    # Get server FQDN
+                    server_fqdn=$(timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$username@$server_ip" "hostname -f" 2>/dev/null || echo "$server_ip")
+                    
+                    # Create facts file
+                    cat > /etc/facter/facts.d/k3s_cluster_info.yaml << EOF
+---
+k3s_cluster_name: "${CLUSTER_NAME}"
+k3s_server_fqdn: "${server_fqdn}"
+k3s_server_ip: "${server_ip}"
+k3s_server_url: "${server_url}"
+k3s_server_node: "${server_fqdn}"
+k3s_is_primary: false
+k3s_node_token: "${token}"
+k3s_token_collected: true
+k3s_discovery_method: "network_ssh"
+k3s_collection_timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EOF
+                    
+                    log_message "Created cluster info facts file"
+                    return 0
+                fi
+                break
+            fi
+        done
+    fi
+    
+    # Method 2: Try HTTP-based token retrieval (if server exposes it)
+    # This would require the server to expose tokens via HTTP, which is not default
+    # but could be implemented as a custom endpoint
+    
+    log_message "Could not retrieve token from $server_ip"
+    return 1
+}
+
+# Main discovery logic
+main() {
+    log_message "Starting K3S server discovery for cluster '$CLUSTER_NAME'"
+    
+    local timeout_count=0
+    local max_attempts=$((TOKEN_TIMEOUT / 30))
+    local discovery_successful=false
+    
+    while [ $timeout_count -lt $max_attempts ] && [ "$discovery_successful" = false ]; do
+        log_message "Discovery attempt $((timeout_count + 1))/$max_attempts"
+        
+        # Discover potential server nodes
+        local server_candidates=($(discover_server_nodes))
+        
+        if [ ${#server_candidates[@]} -gt 0 ]; then
+            log_message "Found ${#server_candidates[@]} potential server(s): ${server_candidates[*]}"
+            
+            # Test each candidate
+            for server_ip in "${server_candidates[@]}"; do
+                if test_and_get_token "$server_ip"; then
+                    log_message "Successfully connected to K3S server at $server_ip"
+                    discovery_successful=true
+                    break
+                fi
+            done
+        else
+            log_message "No potential servers found in this attempt"
+        fi
+        
+        if [ "$discovery_successful" = false ]; then
+            log_message "Discovery attempt failed, waiting 30 seconds before retry..."
+            sleep 30
+            timeout_count=$((timeout_count + 1))
+        fi
+    done
+    
+    if [ "$discovery_successful" = true ]; then
+        log_message "✅ Network discovery completed successfully"
+        echo "SUCCESS: Agent node discovered and configured for cluster '$CLUSTER_NAME'"
+        return 0
+    else
+        log_message "❌ Network discovery failed after $max_attempts attempts"
+        
+        # Create a failure facts file for debugging
+        cat > /etc/facter/facts.d/k3s_cluster_info.yaml << EOF
+---
+k3s_cluster_name: "${CLUSTER_NAME}"
+k3s_node_type: "agent"
+k3s_token_collected: false
+k3s_discovery_failed: true
+k3s_discovery_method: "network_discovery"
+k3s_collection_timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+k3s_error_message: "No K3S servers found after $max_attempts discovery attempts"
+EOF
+        
+        echo "ERROR: Could not discover any K3S servers for cluster '$CLUSTER_NAME'"
+        return 1
+    fi
+}
+
+# Run the main discovery function
+main "$@" 

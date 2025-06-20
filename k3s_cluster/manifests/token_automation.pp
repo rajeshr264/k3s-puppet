@@ -201,26 +201,57 @@ class k3s_cluster::token_automation {
             require => Exec['verify_token_collection'],
           }
         } else {
-          # For single-node deployments, agent nodes are not typically used
-          # But if they are, they need manual token configuration
-          notify { 'k3s_agent_manual_config':
-            message => "K3S agent node requires manual token configuration (storeconfigs not available)",
+          # Alternative token discovery for environments without storeconfigs
+          # Use network discovery to find server nodes in the same cluster
+          
+          notify { 'k3s_agent_network_discovery':
+            message => "K3S agent using network discovery for cluster '${k3s_cluster::cluster_name}' (storeconfigs not available)",
           }
 
-          # Create placeholder facts file for consistency
+          # Create network discovery script for finding server nodes
+          file { '/usr/local/bin/k3s-network-discovery.sh':
+            ensure  => file,
+            mode    => '0755',
+            owner   => 'root',
+            group   => 'root',
+            content => epp('k3s_cluster/network-discovery.sh.epp', {
+              'cluster_name'  => $k3s_cluster::cluster_name,
+              'token_timeout' => $k3s_cluster::token_timeout,
+              'wait_for_token' => $k3s_cluster::wait_for_token,
+            }),
+          }
+
+          # Execute network discovery to find and connect to server
+          exec { 'k3s_network_discovery':
+            command     => '/usr/local/bin/k3s-network-discovery.sh',
+            path        => ['/bin', '/usr/bin', '/usr/local/bin'],
+            require     => File['/usr/local/bin/k3s-network-discovery.sh'],
+            timeout     => $k3s_cluster::token_timeout,
+            tries       => 5,
+            try_sleep   => 30,
+            logoutput   => true,
+            refreshonly => false,
+          }
+
+          # The discovery script will create this facts file if successful
           file { '/etc/facter/facts.d/k3s_cluster_info.yaml':
             ensure  => file,
-            content => @("EOF"),
-              ---
-              k3s_cluster_name: "${k3s_cluster::cluster_name}"
-              k3s_node_type: "agent"
-              k3s_token_collected: false
-              k3s_requires_manual_config: true
-              k3s_collection_timestamp: "${Integer(Timestamp().strftime('%s'))}"
-              | EOF
             mode    => '0644',
             owner   => 'root',
             group   => 'root',
+            require => Exec['k3s_network_discovery'],
+          }
+
+          # Verify that network discovery was successful
+          exec { 'verify_network_discovery':
+            command => 'test -s /etc/facter/facts.d/k3s_cluster_info.yaml && grep -q "k3s_token_collected: true" /etc/facter/facts.d/k3s_cluster_info.yaml',
+            path    => ['/bin', '/usr/bin'],
+            require => File['/etc/facter/facts.d/k3s_cluster_info.yaml'],
+          }
+
+          notify { 'k3s_agent_discovery_completed':
+            message => "K3S agent completed network discovery for cluster '${k3s_cluster::cluster_name}'",
+            require => Exec['verify_network_discovery'],
           }
         }
       }

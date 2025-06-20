@@ -28,10 +28,10 @@ class k3s_cluster::config {
   # Determine configuration based on automated token sharing
   if $k3s_cluster::auto_token_sharing and $k3s_cluster::node_type == 'agent' {
     # Agent with automated token sharing - use collected token from facts
-    if $facts['k3s_server_url'] and $facts['k3s_server_token'] {
+    if $facts['k3s_server_url'] and $facts['k3s_node_token'] {
       $final_config = $k3s_cluster::config_options + {
         'server' => $facts['k3s_server_url'],
-        'token'  => $facts['k3s_server_token'],
+        'token'  => $facts['k3s_node_token'],
       }
     } else {
       # Fallback to manual configuration if facts not available yet
