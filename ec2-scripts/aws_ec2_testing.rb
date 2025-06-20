@@ -285,17 +285,29 @@ class AwsEc2K3sTesting
       # Create module directory
       mkdir -p /etc/puppetlabs/code/modules/k3s_cluster
       
-      # Download K3S module from GitHub using proper archive URL
+      # Download K3S module from GitHub using correct API URL
       cd /tmp
-      curl -L -o k3s-puppet.tar.gz https://github.com/rajeshr/CascadeProjects/archive/refs/heads/main.tar.gz
+      echo "Downloading from GitHub API..."
+      curl -L -H "Accept: application/vnd.github.v3+json" -o k3s-puppet.tar.gz https://api.github.com/repos/rajeshr264/k3s-puppet/tarball/main
+      
+      echo "Extracting archive..."
       tar -xzf k3s-puppet.tar.gz
       
-      # Copy the k3s_cluster module to Puppet modules directory
-      if [ -d "CascadeProjects-main/k3s-puppet/k3s_cluster" ]; then
-        cp -r CascadeProjects-main/k3s-puppet/k3s_cluster/* /etc/puppetlabs/code/modules/k3s_cluster/
+      # Find the extracted directory (GitHub API creates a directory with commit hash)
+      EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "rajeshr264-k3s-puppet-*" | head -1)
+      
+      if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR/k3s_cluster" ]; then
+        echo "Found K3S module in $EXTRACTED_DIR"
+        cp -r "$EXTRACTED_DIR/k3s_cluster"/* /etc/puppetlabs/code/modules/k3s_cluster/
+        echo "K3S module copied successfully"
       else
         echo "ERROR: k3s_cluster module not found in downloaded archive"
-        ls -la CascadeProjects-main/k3s-puppet/ || echo "Directory structure not as expected"
+        echo "Available directories:"
+        ls -la . || echo "No directories found"
+        if [ -n "$EXTRACTED_DIR" ]; then
+          echo "Contents of $EXTRACTED_DIR:"
+          ls -la "$EXTRACTED_DIR" || echo "Cannot list contents"
+        fi
         exit 1
       fi
       
