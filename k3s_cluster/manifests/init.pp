@@ -72,11 +72,6 @@ class k3s_cluster (
 
   case $ensure {
     'present': {
-      # Handle automated token sharing if enabled
-      if $auto_token_sharing {
-        include k3s_cluster::token_automation
-      }
-
       # Install K3S
       include k3s_cluster::install
       
@@ -86,14 +81,19 @@ class k3s_cluster (
       # Manage K3S service
       include k3s_cluster::service
 
+      # Handle automated token sharing if enabled (after service is ready)
+      if $auto_token_sharing {
+        include k3s_cluster::token_automation
+      }
+
       # Establish proper ordering
       Class['k3s_cluster::install']
       -> Class['k3s_cluster::config']
       -> Class['k3s_cluster::service']
 
       if $auto_token_sharing {
-        Class['k3s_cluster::token_automation']
-        -> Class['k3s_cluster::install']
+        Class['k3s_cluster::service']
+        -> Class['k3s_cluster::token_automation']
       }
     }
     'absent': {
