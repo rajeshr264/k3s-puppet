@@ -85,7 +85,11 @@ class k3s_cluster::token_automation {
           owner   => 'root',
           group   => 'root',
           mode    => '0755',
-          content => epp('k3s_cluster/collect-cluster-info.sh.epp'),
+          content => epp('k3s_cluster/collect-cluster-info.sh.epp', {
+            'cluster_name'   => $k3s_cluster::cluster_name,
+            'token_timeout'  => $k3s_cluster::token_timeout,
+            'wait_for_token' => $k3s_cluster::wait_for_token,
+          }),
         }
 
         # Execute cluster info collection
