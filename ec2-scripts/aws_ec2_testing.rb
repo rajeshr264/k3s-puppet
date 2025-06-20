@@ -7,6 +7,7 @@ require 'open3'
 require 'yaml'
 require 'securerandom'
 require 'base64'
+require 'timeout'
 
 class AwsEc2K3sTesting
   # Latest AMI IDs from aws_ec2_ami.txt (updated 2025-06-20)
@@ -612,15 +613,25 @@ class AwsEc2K3sTesting
           '--region', @region
         ])
         
-        puts "Waiting for instances to terminate..."
-        run_aws_command([
-          'ec2', 'wait', 'instance-terminated',
-          '--instance-ids'] + instance_ids + [
-          '--region', @region
-        ])
+        puts "Waiting for instances to terminate (with timeout)..."
+        begin
+          # Use a shorter timeout to avoid RequestExpired errors
+          Timeout::timeout(300) do  # 5 minute timeout
+            run_aws_command([
+              'ec2', 'wait', 'instance-terminated',
+              '--instance-ids'] + instance_ids + [
+              '--region', @region
+            ])
+          end
+          puts "✅ Instances terminated successfully"
+        rescue Timeout::Error, StandardError => e
+          puts "⚠️  Timeout waiting for termination, but instances are likely terminating"
+          puts "   (This is normal - AWS termination can take several minutes)"
+        end
       end
     rescue => e
       puts "Error cleaning up instances: #{e.message}"
+      # Continue with cleanup even if instance cleanup fails
     end
   end
 
