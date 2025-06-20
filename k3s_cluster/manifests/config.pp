@@ -29,7 +29,7 @@ class k3s_cluster::config {
   # Create configuration file
   file { "${k3s_cluster::params::config_dir}/config.yaml":
     ensure  => file,
-    content => to_yaml($final_config),
+    content => stdlib::to_yaml($final_config),
     mode    => '0644',
     owner   => 'root',
     group   => 'root',
@@ -42,6 +42,9 @@ class k3s_cluster::config {
     content => epp('k3s_cluster/k3s_facts.yaml.epp', {
       'config_data' => $final_config,
       'node_type'   => $k3s_cluster::node_type,
+      'service_name' => $k3s_cluster::params::service_name,
+      'config_file' => "${k3s_cluster::params::config_dir}/config.yaml",
+      'version'     => $k3s_cluster::version,
     }),
     mode    => '0644',
     owner   => 'root',
