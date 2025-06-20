@@ -63,9 +63,21 @@ class AwsEc2K3sTesting
   }.freeze
 
   # Configuration with temporary resource support
-  def initialize
-    @session_id = SecureRandom.hex(8)
-    @region = ENV['AWS_REGION'] || 'us-west-2'
+  def initialize(region = 'us-west-2')
+    @region = region
+    @session_id = "k3s-test-#{Time.now.strftime('%Y%m%d-%H%M%S')}-#{SecureRandom.hex(4)}"
+    @instance_tracking_file = "/tmp/k3s-aws-instances-#{@session_id}.json"
+    @created_instances = []
+    
+    puts "🚀 AWS EC2 K3S Testing Session: #{@session_id}"
+    puts "📝 Instance tracking file: #{@instance_tracking_file}"
+    
+    # Load existing instances if tracking file exists
+    load_instance_tracking
+    
+    # Set up cleanup on exit
+    at_exit { cleanup_all_resources }
+    
     @instance_type = ENV['INSTANCE_TYPE'] || 't3.medium'
     @temp_resources = {
       'security_group_id' => nil,
@@ -254,6 +266,15 @@ class AwsEc2K3sTesting
     
     instance_id = result.strip
     puts "Instance launched: #{instance_id}"
+    
+    # Track the created instance
+    track_instance(instance_id, {
+      'name' => instance_name,
+      'os' => os,
+      'deployment_type' => deployment_type,
+      'ami_id' => ami_config['ami_id'],
+      'instance_type' => @instance_type
+    })
     
     # Wait for instance to be running
     puts "Waiting for instance to be running..."
@@ -931,7 +952,12 @@ class AwsEc2K3sTesting
 
   # Cleanup instances
   def cleanup_instances
+    puts "🧹 Starting comprehensive instance cleanup..."
+    all_instance_ids = []
+    
     begin
+      # Method 1: Find instances by session ID tag
+      puts "   🔍 Finding instances by session ID: #{@session_id}"
       result = run_aws_command([
         'ec2', 'describe-instances',
         '--filters', "Name=tag:SessionId,Values=#{@session_id}",
@@ -940,36 +966,153 @@ class AwsEc2K3sTesting
         '--region', @region
       ])
       
-      instance_ids = result.strip.split(/\s+/).reject(&:empty?)
+      session_instances = result.strip.split(/\s+/).reject(&:empty?)
+      puts "   📋 Found #{session_instances.length} instances by session ID"
+      all_instance_ids.concat(session_instances)
       
-      if instance_ids.any?
-        puts "Terminating instances: #{instance_ids.join(', ')}"
-        run_aws_command([
-          'ec2', 'terminate-instances',
-          '--instance-ids'] + instance_ids + [
-          '--region', @region
-        ])
-        
-        puts "Waiting for instances to terminate (with timeout)..."
-        begin
-          # Use a shorter timeout to avoid RequestExpired errors
-          Timeout::timeout(300) do  # 5 minute timeout
-            run_aws_command([
-              'ec2', 'wait', 'instance-terminated',
-              '--instance-ids'] + instance_ids + [
-              '--region', @region
-            ])
-          end
-          puts "✅ Instances terminated successfully"
-        rescue Timeout::Error, StandardError => e
-          puts "⚠️  Timeout waiting for termination, but instances are likely terminating"
-          puts "   (This is normal - AWS termination can take several minutes)"
-        end
-      end
     rescue => e
-      puts "Error cleaning up instances: #{e.message}"
-      # Continue with cleanup even if instance cleanup fails
+      puts "   ⚠️  Error finding instances by session ID: #{e.message}"
     end
+    
+    begin
+      # Method 2: Find instances from tracking file
+      puts "   📂 Finding instances from tracking file"
+      tracked_instances = @created_instances.map { |inst| inst['instance_id'] }
+      puts "   📋 Found #{tracked_instances.length} tracked instances"
+      all_instance_ids.concat(tracked_instances)
+      
+    rescue => e
+      puts "   ⚠️  Error reading tracking file: #{e.message}"
+    end
+    
+    begin
+      # Method 3: Find orphaned instances with our naming pattern
+      puts "   🔍 Finding orphaned instances with k3s-test naming pattern"
+      result = run_aws_command([
+        'ec2', 'describe-instances',
+        '--filters', 
+        'Name=tag:Name,Values=k3s-test-*',
+        'Name=tag:CreatedBy,Values=k3s-multi-os-testing',
+        '--query', 'Reservations[].Instances[?State.Name!=`terminated`].{InstanceId:InstanceId,Name:Tags[?Key==`Name`].Value|[0],LaunchTime:LaunchTime}',
+        '--output', 'json',
+        '--region', @region
+      ])
+      
+      orphaned_data = JSON.parse(result)
+      orphaned_instances = orphaned_data.map { |inst| inst['InstanceId'] }
+      
+      if orphaned_instances.any?
+        puts "   ⚠️  Found #{orphaned_instances.length} potentially orphaned instances:"
+        orphaned_data.each do |inst|
+          launch_time = Time.parse(inst['LaunchTime'])
+          age_hours = ((Time.now - launch_time) / 3600).round(1)
+          puts "     - #{inst['InstanceId']} (#{inst['Name']}) - #{age_hours}h old"
+        end
+        all_instance_ids.concat(orphaned_instances)
+      end
+      
+    rescue => e
+      puts "   ⚠️  Error finding orphaned instances: #{e.message}"
+    end
+    
+    # Remove duplicates and filter out empty values
+    unique_instance_ids = all_instance_ids.compact.uniq.reject(&:empty?)
+    
+    if unique_instance_ids.any?
+      puts "   🎯 Total instances to terminate: #{unique_instance_ids.length}"
+      puts "   📋 Instance IDs: #{unique_instance_ids.join(', ')}"
+      
+      # Verify instances exist before terminating
+      verified_instances = verify_instances_exist(unique_instance_ids)
+      
+      if verified_instances.any?
+        puts "   🗑️  Terminating #{verified_instances.length} verified instances..."
+        terminate_instances(verified_instances)
+      else
+        puts "   ℹ️  No instances found to terminate (all may already be terminated)"
+      end
+    else
+      puts "   ✅ No instances found to cleanup"
+    end
+    
+    # Clean up tracking file
+    cleanup_tracking_file
+  end
+
+  # Verify instances exist and are not already terminated
+  def verify_instances_exist(instance_ids)
+    return [] if instance_ids.empty?
+    
+    begin
+      result = run_aws_command([
+        'ec2', 'describe-instances',
+        '--instance-ids'] + instance_ids + [
+        '--query', 'Reservations[].Instances[?State.Name!=`terminated`].InstanceId',
+        '--output', 'text',
+        '--region', @region
+      ])
+      
+      existing_instances = result.strip.split(/\s+/).reject(&:empty?)
+      puts "   ✅ Verified #{existing_instances.length} instances exist and are not terminated"
+      return existing_instances
+      
+    rescue => e
+      puts "   ⚠️  Error verifying instances: #{e.message}"
+      return []
+    end
+  end
+
+  # Terminate instances with proper error handling
+  def terminate_instances(instance_ids)
+    return if instance_ids.empty?
+    
+    begin
+      run_aws_command([
+        'ec2', 'terminate-instances',
+        '--instance-ids'] + instance_ids + [
+        '--region', @region
+      ])
+      
+      puts "   ✅ Termination request sent for #{instance_ids.length} instances"
+      
+      # Wait for termination with timeout
+      puts "   ⏳ Waiting for instances to terminate (with timeout)..."
+      begin
+        Timeout::timeout(300) do  # 5 minute timeout
+          run_aws_command([
+            'ec2', 'wait', 'instance-terminated',
+            '--instance-ids'] + instance_ids + [
+            '--region', @region
+          ])
+        end
+        puts "   ✅ All instances terminated successfully"
+      rescue Timeout::Error, StandardError => e
+        puts "   ⚠️  Timeout waiting for termination, but instances are likely terminating"
+        puts "   💡 You can check status with: aws ec2 describe-instances --instance-ids #{instance_ids.join(' ')}"
+      end
+      
+    rescue => e
+      puts "   ❌ Error terminating instances: #{e.message}"
+      puts "   💡 You may need to manually terminate: #{instance_ids.join(', ')}"
+    end
+  end
+
+  # Clean up tracking file
+  def cleanup_tracking_file
+    if File.exist?(@instance_tracking_file)
+      File.delete(@instance_tracking_file)
+      puts "   🗑️  Cleaned up tracking file: #{@instance_tracking_file}"
+    end
+  rescue => e
+    puts "   ⚠️  Warning: Could not delete tracking file: #{e.message}"
+  end
+
+  # Enhanced cleanup all resources
+  def cleanup_all_resources
+    puts "\n🧹 Comprehensive cleanup of all resources..."
+    cleanup_instances
+    cleanup_temp_resources
+    puts "✅ Cleanup completed!"
   end
 
   # Cleanup security group
@@ -1095,6 +1238,46 @@ class AwsEc2K3sTesting
     puts "="*70
     
     report
+  end
+
+  # Track created instances
+  def track_instance(instance_id, instance_info = {})
+    instance_data = {
+      'instance_id' => instance_id,
+      'created_at' => Time.now.iso8601,
+      'session_id' => @session_id,
+      'region' => @region
+    }.merge(instance_info)
+    
+    @created_instances << instance_data
+    save_instance_tracking
+    puts "📝 Tracked instance: #{instance_id}"
+  end
+
+  # Save instance tracking to file
+  def save_instance_tracking
+    tracking_data = {
+      'session_id' => @session_id,
+      'region' => @region,
+      'created_at' => Time.now.iso8601,
+      'instances' => @created_instances
+    }
+    
+    File.write(@instance_tracking_file, JSON.pretty_generate(tracking_data))
+  rescue => e
+    puts "⚠️  Warning: Could not save instance tracking: #{e.message}"
+  end
+
+  # Load instance tracking from file
+  def load_instance_tracking
+    return unless File.exist?(@instance_tracking_file)
+    
+    data = JSON.parse(File.read(@instance_tracking_file))
+    @created_instances = data['instances'] || []
+    puts "📂 Loaded #{@created_instances.length} tracked instances"
+  rescue => e
+    puts "⚠️  Warning: Could not load instance tracking: #{e.message}"
+    @created_instances = []
   end
 
   private

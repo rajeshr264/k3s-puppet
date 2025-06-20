@@ -443,24 +443,95 @@ EOF
 
 # Cleanup all resources
 cleanup_resources() {
-    log "Cleaning up all K3S test resources..."
+    echo -e "${BLUE}🧹 Starting comprehensive cleanup of AWS resources...${NC}"
     
-    # Use the k3s-multi-os-testing.sh script for cleanup
-    if [[ -f "$SCRIPT_DIR/k3s-multi-os-testing.sh" ]]; then
+    # Method 1: Use the enhanced Ruby cleanup if available
+    if [ -f "$SCRIPT_DIR/aws_ec2_testing.rb" ]; then
+        echo -e "${BLUE}   Using enhanced Ruby cleanup...${NC}"
+        ruby -e "
+        require_relative '$SCRIPT_DIR/aws_ec2_testing.rb'
+        tester = AwsEc2K3sTesting.new('${AWS_REGION:-us-west-2}')
+        tester.cleanup_all_resources
+        "
+    fi
+    
+    # Method 2: Use standalone orphaned instance cleanup
+    if [ -f "$SCRIPT_DIR/cleanup-orphaned-instances.sh" ]; then
+        echo -e "${BLUE}   Running orphaned instance cleanup...${NC}"
+        bash "$SCRIPT_DIR/cleanup-orphaned-instances.sh" "${AWS_REGION:-us-west-2}"
+    fi
+    
+    # Method 3: Fallback to original k3s-multi-os-testing.sh cleanup
+    if [ -f "$SCRIPT_DIR/k3s-multi-os-testing.sh" ]; then
+        echo -e "${BLUE}   Running legacy cleanup...${NC}"
         bash "$SCRIPT_DIR/k3s-multi-os-testing.sh" cleanup
     else
         warn "k3s-multi-os-testing.sh not found, using direct cleanup"
         
-        # Direct cleanup using AWS CLI
-        aws ec2 describe-instances \
-            --filters "Name=tag:CreatedBy,Values=k3s-multi-os-testing" \
-            --query "Reservations[].Instances[?State.Name!='terminated'].InstanceId" \
-            --output text \
-            --region "$AWS_REGION" | \
-        xargs -r aws ec2 terminate-instances --instance-ids --region "$AWS_REGION"
+        # Method 4: Direct cleanup using AWS CLI
+        echo -e "${BLUE}   Using direct AWS CLI cleanup...${NC}"
+        
+        # Find and terminate k3s test instances
+        local instances
+        instances=$(aws ec2 describe-instances \
+            --region "${AWS_REGION:-us-west-2}" \
+            --filters \
+                "Name=tag:Name,Values=k3s-test-*" \
+                "Name=tag:CreatedBy,Values=k3s-multi-os-testing" \
+                "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text 2>/dev/null || echo "")
+        
+        if [ -n "$instances" ] && [ "$instances" != "" ]; then
+            echo -e "${BLUE}   Terminating instances: $instances${NC}"
+            aws ec2 terminate-instances \
+                --region "${AWS_REGION:-us-west-2}" \
+                --instance-ids $instances >/dev/null 2>&1 || true
+        else
+            echo -e "${GREEN}   ✅ No instances found to cleanup${NC}"
+        fi
+        
+        # Clean up security groups
+        local security_groups
+        security_groups=$(aws ec2 describe-security-groups \
+            --region "${AWS_REGION:-us-west-2}" \
+            --filters "Name=group-name,Values=k3s-test-*" \
+            --query 'SecurityGroups[].GroupId' \
+            --output text 2>/dev/null || echo "")
+        
+        if [ -n "$security_groups" ] && [ "$security_groups" != "" ]; then
+            echo -e "${BLUE}   Cleaning up security groups: $security_groups${NC}"
+            for sg in $security_groups; do
+                aws ec2 delete-security-group \
+                    --region "${AWS_REGION:-us-west-2}" \
+                    --group-id "$sg" >/dev/null 2>&1 || true
+            done
+        fi
+        
+        # Clean up key pairs
+        local key_pairs
+        key_pairs=$(aws ec2 describe-key-pairs \
+            --region "${AWS_REGION:-us-west-2}" \
+            --filters "Name=key-name,Values=k3s-test-*" \
+            --query 'KeyPairs[].KeyName' \
+            --output text 2>/dev/null || echo "")
+        
+        if [ -n "$key_pairs" ] && [ "$key_pairs" != "" ]; then
+            echo -e "${BLUE}   Cleaning up key pairs: $key_pairs${NC}"
+            for kp in $key_pairs; do
+                aws ec2 delete-key-pair \
+                    --region "${AWS_REGION:-us-west-2}" \
+                    --key-name "$kp" >/dev/null 2>&1 || true
+            done
+        fi
     fi
     
-    success "Cleanup completed"
+    # Clean up tracking files
+    echo -e "${BLUE}   Cleaning up tracking files...${NC}"
+    rm -f /tmp/k3s-aws-instances-*.json 2>/dev/null || true
+    
+    echo -e "${GREEN}✅ Cleanup completed!${NC}"
+    echo -e "${BLUE}💡 To verify cleanup, run: ./ec2-scripts/list-k3s-instances.sh${NC}"
 }
 
 # Show status of test instances
