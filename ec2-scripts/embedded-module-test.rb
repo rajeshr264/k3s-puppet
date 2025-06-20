@@ -48,7 +48,7 @@ class EmbeddedModuleTesting < AwsEc2K3sTesting
         Enum['present', 'absent'] $ensure = 'present',
         Enum['server', 'agent'] $node_type = 'server',
         Enum['script', 'binary'] $installation_method = 'script',
-        String $version = 'stable',
+        String $version = 'v1.33.1+k3s1',
         Optional[String] $server_url = undef,
         Optional[String] $token = undef,
         Boolean $cluster_init = false,
@@ -157,7 +157,7 @@ class EmbeddedModuleTesting < AwsEc2K3sTesting
         node_type => 'server',
         cluster_init => true,
         installation_method => 'script',
-        version => 'stable',
+        version => 'v1.33.1+k3s1',
       }
       MANIFEST_EOF
       

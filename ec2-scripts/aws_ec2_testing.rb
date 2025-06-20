@@ -320,7 +320,7 @@ class AwsEc2K3sTesting
         node_type => 'server',
         cluster_init => true,
         installation_method => 'script',
-        version => 'stable',
+        version => 'v1.33.1+k3s1',
       }
       EOF
       

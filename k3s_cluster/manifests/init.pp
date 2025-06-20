@@ -10,7 +10,7 @@
 # @param installation_method
 #   Installation method: 'script' (default) or 'binary'
 # @param version
-#   K3S version to install (default: 'stable')
+#   K3S version to install (default: 'v1.33.1+k3s1')
 # @param server_url
 #   URL of K3S server for agent nodes
 # @param token
@@ -40,7 +40,7 @@ class k3s_cluster (
   Enum['present', 'absent']                $ensure                      = 'present',
   Enum['server', 'agent']                  $node_type                   = 'server',
   Enum['script', 'binary']                 $installation_method         = 'script',
-  String                                   $version                     = 'stable',
+  String                                   $version                     = 'v1.33.1+k3s1',
   Optional[Stdlib::HTTPUrl]                $server_url                  = undef,
   Optional[String]                         $token                       = undef,
   Boolean                                  $cluster_init                = false,

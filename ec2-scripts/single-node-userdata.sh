@@ -53,14 +53,15 @@ cat > /etc/puppetlabs/code/environments/production/modules/k3s_cluster/manifests
 class k3s_cluster (
   Enum['present', 'absent'] $ensure = 'present',
   Enum['server', 'agent'] $node_type = 'server',
+  String $version = 'v1.33.1+k3s1',
   Hash $config_options = {},
 ) {
   
   case $ensure {
     'present': {
-      # Install K3S using the official script
+      # Install K3S using the official script with specific version
       exec { 'install_k3s':
-        command => 'curl -sfL https://get.k3s.io | sh -',
+        command => "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${version} sh -",
         path    => ['/bin', '/usr/bin'],
         creates => '/usr/local/bin/k3s',
         timeout => 300,
@@ -109,7 +110,7 @@ EOF
 
 # Apply K3S configuration
 log "Applying K3S Puppet configuration..."
-puppet apply -e "class { 'k3s_cluster': ensure => 'present' }" --detailed-exitcodes
+puppet apply -e "class { 'k3s_cluster': ensure => 'present', version => 'v1.33.1+k3s1' }" --detailed-exitcodes
 
 # Wait for K3S to be ready
 log "Waiting for K3S to be ready..."
