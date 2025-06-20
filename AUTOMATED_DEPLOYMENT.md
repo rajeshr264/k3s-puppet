@@ -249,4 +249,90 @@ verify-cluster:
     - kubectl get pods -A
 ```
 
+## Enhanced Token Readiness Verification
+
+The module includes comprehensive token readiness verification to ensure agents are only launched after the master server token is completely ready and validated. This prevents common timing issues where agents attempt to join with incomplete or invalid tokens.
+
+### Verification Steps
+
+The token readiness process includes:
+
+1. **SSH Connectivity**: Verify connection to server node
+2. **Service Status**: Confirm K3S service is active and running
+3. **Node Readiness**: Wait for server node to reach "Ready" status
+4. **Token Availability**: Check that token file exists and has valid content
+5. **Token Format Validation**: Verify token follows K3S format (starts with 'K', 40+ characters)
+6. **Authentication Testing**: Test token by performing actual API calls
+7. **API Server Accessibility**: Confirm API server is responding to requests
+
+### Automatic Sequencing
+
+```puppet
+# Server nodes export tokens only after full readiness verification
+class { 'k3s_cluster':
+  ensure                => 'present',
+  node_type            => 'server',
+  cluster_name         => 'production',
+  auto_token_sharing   => true,
+  token_timeout        => 300,  # Wait up to 5 minutes for token readiness
+}
+
+# Agent nodes automatically wait for validated tokens
+class { 'k3s_cluster':
+  ensure                => 'present', 
+  node_type            => 'agent',
+  cluster_name         => 'production',
+  auto_token_sharing   => true,
+  wait_for_token       => true,
+}
+```
+
+### Manual Verification
+
+You can manually verify token readiness using the standalone script:
+
+```bash
+# Verify server token is ready before launching agents
+./ec2-scripts/verify-server-token-ready.sh <server_ip> <ssh_user> [ssh_key_path]
+
+# Example output:
+# 🎉 K3S Server Readiness Verification Complete!
+# ✅ SSH connectivity: OK
+# ✅ K3S service: Active  
+# ✅ Node status: Ready
+# ✅ Server token: Valid and authenticated
+# ✅ API server: Ready and accessible
+# 🚀 Server is ready for agent connections!
+# TOKEN:K10abc123def456...
+```
+
+### Troubleshooting Token Issues
+
+If token readiness verification fails:
+
+1. **Check service logs**:
+   ```bash
+   sudo journalctl -u k3s --no-pager --lines=20
+   ```
+
+2. **Verify token file permissions**:
+   ```bash
+   sudo ls -la /var/lib/rancher/k3s/server/node-token
+   sudo cat /var/lib/rancher/k3s/server/node-token
+   ```
+
+3. **Test API server manually**:
+   ```bash
+   sudo k3s kubectl get nodes
+   sudo k3s kubectl cluster-info
+   ```
+
+4. **Check for port conflicts**:
+   ```bash
+   sudo netstat -tlnp | grep :6443
+   sudo systemctl status k3s
+   ```
+
+This enhanced verification eliminates race conditions and ensures reliable multi-node deployments.
+
 This automated deployment feature significantly simplifies K3S cluster management while maintaining security and reliability standards. 

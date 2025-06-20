@@ -58,6 +58,48 @@ class k3s_cluster::token_automation {
           logoutput => true,
         }
 
+        # Enhanced token readiness verification
+        file { '/tmp/wait-for-token-ready.sh':
+          ensure  => file,
+          owner   => 'root',
+          group   => 'root',
+          mode    => '0755',
+          content => epp('k3s_cluster/wait-for-token-ready.sh.epp'),
+        }
+
+        exec { 'wait_for_server_token_ready':
+          command   => '/tmp/wait-for-token-ready.sh',
+          path      => ['/usr/local/bin', '/usr/bin', '/bin'],
+          timeout   => $k3s_cluster::token_timeout,
+          tries     => 2,
+          try_sleep => 30,
+          require   => [
+            File['/tmp/wait-for-token-ready.sh'],
+            Exec['wait_for_k3s_api_ready'],
+          ],
+        }
+
+        # Collect cluster information script
+        file { '/tmp/collect-cluster-info.sh':
+          ensure  => file,
+          owner   => 'root',
+          group   => 'root',
+          mode    => '0755',
+          content => epp('k3s_cluster/collect-cluster-info.sh.epp'),
+        }
+
+        # Execute cluster info collection
+        exec { 'collect_cluster_info':
+          command   => '/tmp/collect-cluster-info.sh',
+          path      => ['/usr/local/bin', '/usr/bin', '/bin'],
+          timeout   => 120,
+          creates   => '/tmp/k3s_cluster_info.yaml',
+          require   => [
+            File['/tmp/collect-cluster-info.sh'],
+            Exec['wait_for_server_token_ready'],
+          ],
+        }
+
         # Export cluster information as a resource for agents to collect
         # This uses Puppet's exported resources feature
         @@k3s_cluster_info { "${k3s_cluster::cluster_name}_${facts['networking']['hostname']}":
@@ -71,7 +113,7 @@ class k3s_cluster::token_automation {
           token_file     => '/var/lib/rancher/k3s/server/node-token',
           export_time    => Integer($facts['timestamp']),
           tag            => "k3s_cluster_${k3s_cluster::cluster_name}",
-          require        => Exec['wait_for_k3s_api_ready'],
+          require        => Exec['collect_cluster_info'],
         }
 
         # Create local facts about this server for reference
@@ -92,7 +134,7 @@ class k3s_cluster::token_automation {
           group   => 'root',
           require => [
             File['/etc/facter/facts.d'],
-            Exec['wait_for_k3s_api_ready'],
+            Exec['collect_cluster_info'],
           ],
         }
 
