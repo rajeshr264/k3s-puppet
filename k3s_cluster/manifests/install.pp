@@ -39,9 +39,25 @@ class k3s_cluster::install {
 
   case $k3s_cluster::installation_method {
     'script': {
+      # Download the K3S installation script using wget
+      exec { 'download_k3s_script':
+        command => "wget -O /tmp/k3s-install.sh ${k3s_cluster::params::install_script_url}",
+        path    => ['/usr/bin', '/bin', '/usr/local/bin'],
+        creates => '/tmp/k3s-install.sh',
+        timeout => 60,
+        require => File[$k3s_cluster::params::config_dir],
+      }
+
+      # Make the script executable
+      file { '/tmp/k3s-install.sh':
+        ensure  => file,
+        mode    => '0755',
+        require => Exec['download_k3s_script'],
+      }
+
       # Install using the official K3S installation script
       exec { 'install_k3s':
-        command     => "curl -sfL ${k3s_cluster::params::install_script_url} | sh -",
+        command     => 'sh /tmp/k3s-install.sh',
         path        => ['/usr/bin', '/bin', '/usr/local/bin'],
         creates     => $k3s_cluster::params::binary_path,
         environment => [
@@ -49,7 +65,7 @@ class k3s_cluster::install {
           "INSTALL_K3S_EXEC=${k3s_cluster::node_type}",
         ],
         timeout     => 300,
-        require     => File[$k3s_cluster::params::config_dir],
+        require     => File['/tmp/k3s-install.sh'],
       }
     }
     'binary': {
