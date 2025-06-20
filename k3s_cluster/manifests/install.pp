@@ -7,11 +7,34 @@ class k3s_cluster::install {
   include k3s_cluster::params
 
   # Create necessary directories
-  file { $k3s_cluster::params::config_dir:
+  file { '/etc/rancher':
     ensure => directory,
     owner  => 'root',
     group  => 'root',
     mode   => '0755',
+  }
+
+  file { $k3s_cluster::params::config_dir:
+    ensure  => directory,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    require => File['/etc/rancher'],
+  }
+
+  file { '/var/lib/rancher':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
+
+  file { $k3s_cluster::params::data_dir:
+    ensure  => directory,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    require => File['/var/lib/rancher'],
   }
 
   case $k3s_cluster::installation_method {

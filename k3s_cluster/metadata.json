@@ -1,5 +1,5 @@
 {
-  "name": "k3s_cluster",
+  "name": "rajeshr-k3s_cluster",
   "version": "0.1.0",
   "author": "K3S Puppet Module Contributors",
   "summary": "Puppet module for deploying K3S Kubernetes clusters on one or more nodes",
