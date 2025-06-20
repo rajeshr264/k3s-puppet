@@ -9,6 +9,22 @@ class k3s_cluster::config {
   # Configuration directory is created by k3s_cluster::install
   # Data directory is created by k3s_cluster::install
 
+  # Ensure facts directory exists for storing cluster information
+  file { '/etc/facter':
+    ensure => directory,
+    mode   => '0755',
+    owner  => 'root',
+    group  => 'root',
+  }
+
+  file { '/etc/facter/facts.d':
+    ensure  => directory,
+    mode    => '0755',
+    owner   => 'root',
+    group   => 'root',
+    require => File['/etc/facter'],
+  }
+
   # Determine configuration based on automated token sharing
   if $k3s_cluster::auto_token_sharing and $k3s_cluster::node_type == 'agent' {
     # Agent with automated token sharing - use collected token from facts

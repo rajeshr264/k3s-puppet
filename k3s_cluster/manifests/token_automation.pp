@@ -23,21 +23,7 @@ class k3s_cluster::token_automation {
   # Only proceed if automated token sharing is enabled
   if $k3s_cluster::auto_token_sharing and $k3s_cluster::cluster_name {
 
-    # Ensure facts directory exists for storing cluster information
-    file { '/etc/facter':
-      ensure => directory,
-      mode   => '0755',
-      owner  => 'root',
-      group  => 'root',
-    }
-
-    file { '/etc/facter/facts.d':
-      ensure  => directory,
-      mode    => '0755',
-      owner   => 'root',
-      group   => 'root',
-      require => File['/etc/facter'],
-    }
+    # Facts directory is created by k3s_cluster::config
 
     case $k3s_cluster::node_type {
       'server': {
@@ -158,10 +144,6 @@ class k3s_cluster::token_automation {
           mode    => '0644',
           owner   => 'root',
           group   => 'root',
-          require => [
-            File['/etc/facter/facts.d'],
-            Exec['collect_cluster_info'],
-          ],
         }
       }
 
@@ -183,7 +165,6 @@ class k3s_cluster::token_automation {
               'token_timeout' => $k3s_cluster::token_timeout,
               'wait_for_token' => $k3s_cluster::wait_for_token,
             }),
-            require => File['/etc/facter/facts.d'],
           }
 
           # Execute the collection script to gather cluster information
@@ -240,7 +221,6 @@ class k3s_cluster::token_automation {
             mode    => '0644',
             owner   => 'root',
             group   => 'root',
-            require => File['/etc/facter/facts.d'],
           }
         }
       }
