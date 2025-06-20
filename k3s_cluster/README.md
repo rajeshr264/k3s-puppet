@@ -16,6 +16,8 @@ information to include in your README.
 1. [Usage - Configuration options and additional functionality](#usage)
 1. [Limitations - OS compatibility, etc.](#limitations)
 1. [Development - Guide for contributing to the module](#development)
+1. [Features](#features)
+1. [RPM Lock Handling](#rpm-lock-handling)
 
 ## Description
 
@@ -111,6 +113,59 @@ to your project and how they should submit their work.
 If you aren't using changelog, put your release notes here (though you should
 consider using changelog). You can also add any additional sections you feel are
 necessary or important to include here. Please use the `##` header.
+
+## Features
+
+- **Flexible Installation**: Support for both script-based and binary installation methods
+- **Multi-Node Support**: Configure server and agent nodes with automated token sharing
+- **High Availability**: Support for external datastores and embedded etcd
+- **Configuration Management**: YAML-based configuration with merge capabilities
+- **Service Management**: Systemd service configuration with health checks
+- **Complete Uninstallation**: Clean removal including containers, network, and iptables
+- **Platform Support**: Multiple OS families (RedHat, Debian, SUSE) and architectures
+- **Automated Token Sharing**: Exported resources for seamless multi-node deployment
+- **RPM Lock Handling**: Built-in handling of package manager conflicts on RPM-based systems
+- **Retry Logic**: Automatic retry mechanisms for robust installation on cloud environments
+
+## RPM Lock Handling
+
+This module includes built-in handling for RPM transaction lock issues commonly encountered on RHEL-based systems, especially in cloud environments like AWS EC2. The module automatically:
+
+- **Detects RPM locks** before installation attempts
+- **Waits for lock release** with configurable timeout (5 minutes)
+- **Cleans up hanging processes** (yum, dnf, rpm, packagekit)
+- **Temporarily stops conflicting services** (AWS SSM agent, packagekit)
+- **Implements retry logic** with 3 attempts and 30-second delays
+- **Restarts services** after successful installation
+
+### Supported Scenarios
+
+The RPM lock handling addresses these common issues:
+- AWS Systems Manager agent running automatic updates
+- Cloud-init installing packages simultaneously
+- Multiple package manager processes running concurrently
+- Stale lock files from interrupted operations
+
+### Manual Troubleshooting
+
+If you encounter persistent RPM lock issues, you can run the lock handler manually:
+
+```bash
+# The module creates this script automatically
+sudo /tmp/rpm-lock-handler.sh
+```
+
+Or check for locks manually:
+```bash
+# Check if RPM database is locked
+sudo fuser /var/lib/rpm/.rpm.lock
+
+# Wait for lock release
+while sudo fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; do
+  echo "Waiting for RPM lock..."
+  sleep 10
+done
+```
 
 [1]: https://puppet.com/docs/pdk/latest/pdk_generating_modules.html
 [2]: https://puppet.com/docs/puppet/latest/puppet_strings.html

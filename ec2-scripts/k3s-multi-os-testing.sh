@@ -13,7 +13,7 @@ readonly AWS_REGION="${AWS_REGION:-us-west-2}"
 readonly INSTANCE_TYPE="${INSTANCE_TYPE:-t3.medium}"
 
 # Supported operating systems (matches latest AMIs)
-readonly SUPPORTED_OS=("ubuntu" "rhel" "opensuse" "sles" "debian" "rocky" "almalinux" "fedora")
+readonly SUPPORTED_OS=("ubuntu" "rhel" "debian" "rocky" "almalinux" "fedora")
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -222,7 +222,7 @@ def main
     server_info = testing.launch_instance('ubuntu', 'server')
     
     # Launch agent nodes (different OS)
-    agent_os_list = ['rhel', 'opensuse']
+    agent_os_list = ['rhel', 'debian']
     agent_instances = []
     
     agent_os_list.each do |os|

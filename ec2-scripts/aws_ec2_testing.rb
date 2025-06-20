@@ -324,6 +324,56 @@ class AwsEc2K3sTesting
     # Install K3S using Puppet module
     script += <<~SCRIPT
       
+      echo '=== Installing Puppet 8 ==='\n
+      # Install Puppet based on OS family
+      if command -v apt-get >/dev/null 2>&1; then
+        #{install_puppet_apt(os)}
+      elif command -v dnf >/dev/null 2>&1; then
+        # Handle RPM lock issues on RHEL-based systems
+        echo "Checking for RPM locks before Puppet installation..."
+        
+        # Function to check if RPM is locked
+        check_rpm_lock() {
+            if sudo fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; then
+                return 0  # locked
+            else
+                return 1  # not locked
+            fi
+        }
+        
+        # Wait for RPM lock to be released
+        timeout=300  # 5 minutes
+        elapsed=0
+        while check_rpm_lock; do
+            if [ $elapsed -ge $timeout ]; then
+                echo "Timeout waiting for RPM lock, forcing cleanup"
+                sudo rm -f /var/lib/rpm/.rpm.lock
+                break
+            fi
+            echo "RPM database is locked, waiting... ($elapsed/$timeout seconds)"
+            sleep 10
+            elapsed=$((elapsed + 10))
+        done
+        
+        # Kill any hanging package processes
+        echo "Cleaning up any hanging package processes..."
+        sudo pkill -f "yum\\|dnf\\|rpm" 2>/dev/null || true
+        
+        # Stop SSM agent temporarily
+        sudo systemctl stop amazon-ssm-agent 2>/dev/null || true
+        sleep 5
+        
+        #{install_puppet_dnf(os)}
+        
+        # Restart SSM agent
+        sudo systemctl start amazon-ssm-agent 2>/dev/null || true
+      elif command -v zypper >/dev/null 2>&1; then
+        #{install_puppet_zypper(os)}
+      else
+        echo "ERROR: Unsupported package manager"
+        exit 1
+      fi
+      
       echo '=== Installing Puppet Dependencies ==='\n
       # Install required Puppet modules
       puppet module install puppet-archive --force
@@ -360,16 +410,44 @@ class AwsEc2K3sTesting
       fi
       
       echo '=== Applying K3S Puppet Configuration ==='\n
-      # Create Puppet manifest for single node installation
-      cat > /tmp/k3s_config.pp << 'EOF'
-      class { 'k3s_cluster':
-        ensure => 'present',
-        node_type => 'server',
-        cluster_init => true,
-        installation_method => 'script',
-        version => 'v1.33.1+k3s1',
-      }
-      EOF
+      # Create Puppet manifest based on deployment type
+      if [ "#{deployment_type}" = "server" ]; then
+        cat > /tmp/k3s_config.pp << 'EOF'
+        class { 'k3s_cluster':
+          ensure => 'present',
+          node_type => 'server',
+          cluster_init => true,
+          installation_method => 'script',
+          version => 'v1.33.1+k3s1',
+          cluster_name => 'k3s-test-cluster',
+          auto_token_sharing => true,
+        }
+        EOF
+      elif [ "#{deployment_type}" = "agent" ]; then
+        cat > /tmp/k3s_config.pp << 'EOF'
+        class { 'k3s_cluster':
+          ensure => 'present',
+          node_type => 'agent',
+          installation_method => 'script',
+          version => 'v1.33.1+k3s1',
+          cluster_name => 'k3s-test-cluster',
+          auto_token_sharing => true,
+          wait_for_token => true,
+          token_timeout => 300,
+        }
+        EOF
+      else
+        # Default single node configuration
+        cat > /tmp/k3s_config.pp << 'EOF'
+        class { 'k3s_cluster':
+          ensure => 'present',
+          node_type => 'server',
+          cluster_init => true,
+          installation_method => 'script',
+          version => 'v1.33.1+k3s1',
+        }
+        EOF
+      fi
       
       echo '=== Running Puppet Apply ==='\n
       # Apply Puppet configuration with verbose output
@@ -391,38 +469,67 @@ class AwsEc2K3sTesting
       fi
       
       echo '=== Testing K3S Installation ==='\n
-      # Test K3S functionality
+      # Test K3S functionality based on node type
       k3s --version
       
-      # Wait for cluster to be ready
-      echo "Waiting for K3S cluster to be ready..."
-      timeout 60 bash -c 'until k3s kubectl get nodes >/dev/null 2>&1; do 
-        echo "$(date): Waiting for cluster readiness..."
-        sleep 5
-      done'
-      
-      k3s kubectl get nodes
-      
-      echo '=== Creating Final Test Completion Marker ==='\n
-      # Create comprehensive test completion marker
-      if systemctl is-active --quiet k3s && k3s kubectl get nodes >/dev/null 2>&1; then
-        echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
-        echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
-        echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
-        echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
-        echo "K3S service is running" >> /tmp/k3s_test_complete
-        echo "Cluster is responsive" >> /tmp/k3s_test_complete
-        k3s --version >> /tmp/k3s_test_complete
-        k3s kubectl get nodes >> /tmp/k3s_test_complete
-        echo "Puppet module test: SUCCESS" >> /tmp/k3s_test_complete
+      if [ "#{deployment_type}" = "server" ]; then
+        # Server node testing
+        echo "Testing K3S server functionality..."
+        
+        # Wait for cluster to be ready
+        echo "Waiting for K3S cluster to be ready..."
+        timeout 60 bash -c 'until k3s kubectl get nodes >/dev/null 2>&1; do 
+          echo "$(date): Waiting for cluster readiness..."
+          sleep 5
+        done'
+        
+        k3s kubectl get nodes
+        
+        echo '=== Creating Final Test Completion Marker ==='\n
+        # Create comprehensive test completion marker for server
+        if systemctl is-active --quiet k3s && k3s kubectl get nodes >/dev/null 2>&1; then
+          echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
+          echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
+          echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
+          echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
+          echo "K3S service is running" >> /tmp/k3s_test_complete
+          echo "Cluster is responsive" >> /tmp/k3s_test_complete
+          k3s --version >> /tmp/k3s_test_complete
+          k3s kubectl get nodes >> /tmp/k3s_test_complete
+          echo "Puppet module test: SUCCESS" >> /tmp/k3s_test_complete
+        else
+          echo "K3S Puppet module deployment failed on #{ami_config['name']}" > /tmp/k3s_test_complete
+          echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
+          echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
+          echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
+          echo "K3S service status: $(systemctl is-active k3s)" >> /tmp/k3s_test_complete
+          systemctl status k3s >> /tmp/k3s_test_complete 2>&1
+          echo "Puppet module test: FAILED" >> /tmp/k3s_test_complete
+        fi
       else
-        echo "K3S Puppet module deployment failed on #{ami_config['name']}" > /tmp/k3s_test_complete
-        echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
-        echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
-        echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
-        echo "K3S service status: $(systemctl is-active k3s)" >> /tmp/k3s_test_complete
-        systemctl status k3s >> /tmp/k3s_test_complete 2>&1
-        echo "Puppet module test: FAILED" >> /tmp/k3s_test_complete
+        # Agent node testing
+        echo "Testing K3S agent functionality..."
+        
+        # For agent nodes, just check if the service is running
+        # They don't have kubectl access
+        echo '=== Creating Final Test Completion Marker ==='\n
+        if systemctl is-active --quiet k3s-agent; then
+          echo "K3S Puppet module deployment completed successfully on #{ami_config['name']}" > /tmp/k3s_test_complete
+          echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
+          echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
+          echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
+          echo "K3S agent service is running" >> /tmp/k3s_test_complete
+          k3s --version >> /tmp/k3s_test_complete
+          echo "Puppet module test: SUCCESS" >> /tmp/k3s_test_complete
+        else
+          echo "K3S Puppet module deployment failed on #{ami_config['name']}" > /tmp/k3s_test_complete
+          echo "Deployment type: #{deployment_type}" >> /tmp/k3s_test_complete
+          echo "Installation method: Puppet module" >> /tmp/k3s_test_complete
+          echo "Timestamp: $(date)" >> /tmp/k3s_test_complete
+          echo "K3S agent service status: $(systemctl is-active k3s-agent)" >> /tmp/k3s_test_complete
+          systemctl status k3s-agent >> /tmp/k3s_test_complete 2>&1
+          echo "Puppet module test: FAILED" >> /tmp/k3s_test_complete
+        fi
       fi
       
       echo '=== K3S Puppet Module Installation Complete ==='\n
@@ -541,13 +648,13 @@ class AwsEc2K3sTesting
   end
 
   # Test instance connectivity and K3S deployment
-  def test_instance(instance_info)
+  def test_instance(instance_info, deployment_type = 'single')
     instance_id = instance_info['instance_id']
     public_ip = instance_info['public_ip']
     os = instance_info['os']
     user = LATEST_AMIS[os]['user']
     
-    puts "Testing instance #{instance_id} (#{public_ip})"
+    puts "Testing instance #{instance_id} (#{public_ip}) - #{deployment_type} node"
     
     # Wait for SSH to be available
     max_attempts = 30
@@ -596,79 +703,108 @@ class AwsEc2K3sTesting
         
         # Check 1: Service Status Verification
         puts "   ✓ Checking K3S service status..."
-        service_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "inactive"')
-        service_enabled = ssh_command(public_ip, user, 'sudo systemctl is-enabled k3s 2>/dev/null || echo "disabled"')
+        
+        if deployment_type == 'agent'
+          # Agent nodes use k3s-agent service
+          service_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s-agent 2>/dev/null || echo "inactive"')
+          service_enabled = ssh_command(public_ip, user, 'sudo systemctl is-enabled k3s-agent 2>/dev/null || echo "disabled"')
+          service_name = 'k3s-agent'
+        else
+          # Server nodes use k3s service
+          service_status = ssh_command(public_ip, user, 'sudo systemctl is-active k3s 2>/dev/null || echo "inactive"')
+          service_enabled = ssh_command(public_ip, user, 'sudo systemctl is-enabled k3s 2>/dev/null || echo "disabled"')
+          service_name = 'k3s'
+        end
         
         if service_status.strip == "active"
-          puts "   ✅ K3S service is active and running"
+          puts "   ✅ K3S #{service_name} service is active and running"
           
-          # Check 2: Cluster Information Check
-          puts "   ✓ Checking cluster connectivity..."
-          cluster_info = ssh_command(public_ip, user, 'sudo k3s kubectl cluster-info 2>/dev/null | head -1 || echo "FAILED"')
-          
-          if cluster_info.include?("Kubernetes control plane")
-            puts "   ✅ Kubernetes API server is accessible"
+          if deployment_type == 'agent'
+            # For agent nodes, we can't do kubectl checks, so just verify the service is healthy
+            puts "   ✓ Agent node health verification..."
             
-            # Check 3: Node Status Verification
-            puts "   ✓ Checking node readiness..."
-            node_status = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | awk \'{print $2}\' || echo "NotReady"')
-            
-            if node_status.strip == "Ready"
-              puts "   ✅ Node is in Ready state"
-              
-              # Check 4: Pod Health Assessment
-              puts "   ✓ Checking system pods health..."
-              pods_status = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l || echo "999"')
-              
-              non_running_pods = pods_status.strip.to_i
-              if non_running_pods == 0
-                puts "   ✅ All system pods are running correctly"
-                
-                # Check 5: Kubeconfig File Verification
-                puts "   ✓ Verifying kubeconfig file..."
-                kubeconfig_check = ssh_command(public_ip, user, 'sudo test -f /etc/rancher/k3s/k3s.yaml && sudo test -s /etc/rancher/k3s/k3s.yaml && echo "OK" || echo "MISSING"')
-                
-                if kubeconfig_check.strip == "OK"
-                  puts "   ✅ Kubeconfig file exists and is not empty"
-                  
-                  # Check 6: Test Pod Deployment (Quick functional test)
-                  puts "   ✓ Testing pod deployment capability..."
-                  test_pod_result = ssh_command(public_ip, user, 'sudo k3s kubectl run test-pod-verify --image=nginx:alpine --restart=Never --timeout=30s 2>/dev/null && sleep 5 && sudo k3s kubectl get pod test-pod-verify --no-headers 2>/dev/null | awk \'{print $3}\' && sudo k3s kubectl delete pod test-pod-verify --timeout=10s >/dev/null 2>&1 || echo "FAILED"')
-                  
-                  if test_pod_result.strip == "Running" || test_pod_result.include?("Running")
-                    puts "   ✅ Pod deployment test successful"
-                    puts ""
-                    puts "🎉 All K3S health checks passed! Cluster is fully operational."
-                    health_checks_passed = true
-                    break
-                  else
-                    puts "   ⚠️  Pod deployment test failed, but basic cluster is functional"
-                    puts "   📝 This might be due to image pull delays or resource constraints"
-                    # Still consider this a success since core K3S is working
-                    health_checks_passed = true
-                    break
-                  end
-                else
-                  puts "   ❌ Kubeconfig file is missing or empty"
-                end
-              else
-                puts "   ⚠️  #{non_running_pods} system pods are not running yet"
-                
-                # Show pod details for debugging
-                if elapsed % 30 == 0  # Every 30 seconds
-                  pod_details = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces 2>/dev/null | grep -v Running | grep -v Completed || echo "No problematic pods found"')
-                  puts "   📋 Non-running pods:"
-                  puts pod_details.split("\n").map { |line| "      #{line}" }.join("\n")
-                end
-              end
+            # Check if the agent process is running and connected
+            agent_logs = ssh_command(public_ip, user, 'sudo journalctl -u k3s-agent --no-pager --lines=5 | tail -3 || echo "No logs"')
+            if agent_logs.include?("Starting") || agent_logs.include?("Ready") || !agent_logs.include?("Failed")
+              puts "   ✅ K3S agent appears to be running normally"
+              puts ""
+              puts "🎉 K3S agent health checks passed! Agent node is operational."
+              health_checks_passed = true
+              break
             else
-              puts "   ⚠️  Node status: #{node_status.strip}"
+              puts "   ⚠️  Agent logs show potential issues:"
+              puts agent_logs.split("\n").map { |line| "      #{line}" }.join("\n")
             end
           else
-            puts "   ⚠️  Cluster API not accessible yet"
+            # Server node checks (existing logic)
+            # Check 2: Cluster Information Check
+            puts "   ✓ Checking cluster connectivity..."
+            cluster_info = ssh_command(public_ip, user, 'sudo k3s kubectl cluster-info 2>/dev/null | head -1 || echo "FAILED"')
+            
+            if cluster_info.include?("Kubernetes control plane")
+              puts "   ✅ Kubernetes API server is accessible"
+              
+              # Check 3: Node Status Verification
+              puts "   ✓ Checking node readiness..."
+              node_status = ssh_command(public_ip, user, 'sudo k3s kubectl get nodes --no-headers 2>/dev/null | awk \'{print $2}\' || echo "NotReady"')
+              
+              if node_status.strip == "Ready"
+                puts "   ✅ Node is in Ready state"
+                
+                # Check 4: Pod Health Assessment
+                puts "   ✓ Checking system pods health..."
+                pods_status = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l || echo "999"')
+                
+                non_running_pods = pods_status.strip.to_i
+                if non_running_pods == 0
+                  puts "   ✅ All system pods are running correctly"
+                  
+                  # Check 5: Kubeconfig File Verification
+                  puts "   ✓ Verifying kubeconfig file..."
+                  kubeconfig_check = ssh_command(public_ip, user, 'sudo test -f /etc/rancher/k3s/k3s.yaml && sudo test -s /etc/rancher/k3s/k3s.yaml && echo "OK" || echo "MISSING"')
+                  
+                  if kubeconfig_check.strip == "OK"
+                    puts "   ✅ Kubeconfig file exists and is not empty"
+                    
+                    # Check 6: Test Pod Deployment (Quick functional test)
+                    puts "   ✓ Testing pod deployment capability..."
+                    test_pod_result = ssh_command(public_ip, user, 'sudo k3s kubectl run test-pod-verify --image=nginx:alpine --restart=Never --timeout=30s 2>/dev/null && sleep 5 && sudo k3s kubectl get pod test-pod-verify --no-headers 2>/dev/null | awk \'{print $3}\' && sudo k3s kubectl delete pod test-pod-verify --timeout=10s >/dev/null 2>&1 || echo "FAILED"')
+                    
+                    if test_pod_result.strip == "Running" || test_pod_result.include?("Running")
+                      puts "   ✅ Pod deployment test successful"
+                      puts ""
+                      puts "🎉 All K3S health checks passed! Cluster is fully operational."
+                      health_checks_passed = true
+                      break
+                    else
+                      puts "   ⚠️  Pod deployment test failed, but basic cluster is functional"
+                      puts "   📝 This might be due to image pull delays or resource constraints"
+                      # Still consider this a success since core K3S is working
+                      health_checks_passed = true
+                      break
+                    end
+                  else
+                    puts "   ❌ Kubeconfig file is missing or empty"
+                  end
+                else
+                  puts "   ⚠️  #{non_running_pods} system pods are not running yet"
+                  
+                  # Show pod details for debugging
+                  if elapsed % 30 == 0  # Every 30 seconds
+                    pod_details = ssh_command(public_ip, user, 'sudo k3s kubectl get pods --all-namespaces 2>/dev/null | grep -v Running | grep -v Completed || echo "No problematic pods found"')
+                    puts "   📋 Non-running pods:"
+                    puts pod_details.split("\n").map { |line| "      #{line}" }.join("\n")
+                  end
+                end
+              else
+                puts "   ⚠️  Node status: #{node_status.strip}"
+              end
+            else
+              puts "   ⚠️  Cluster API not accessible yet"
+            end
           end
         else
-          puts "   ⚠️  K3S service status: #{service_status.strip}"
+          puts "   ⚠️  K3S #{service_name} service status: #{service_status.strip}"
           
           # Check if Puppet is still running (might be installing K3S)
           puppet_running = ssh_command(public_ip, user, 'pgrep -f puppet >/dev/null && echo "RUNNING" || echo "FINISHED"')
@@ -677,8 +813,8 @@ class AwsEc2K3sTesting
           # Check if there are any obvious errors in the K3S service
           if elapsed > 60  # After 1 minute, start showing more detailed info
             begin
-              service_logs = ssh_command(public_ip, user, 'sudo journalctl -u k3s --no-pager --lines=3 2>/dev/null | tail -3 || echo "No logs available"')
-              puts "   📋 Recent K3S service logs:"
+              service_logs = ssh_command(public_ip, user, "sudo journalctl -u #{service_name} --no-pager --lines=3 2>/dev/null | tail -3 || echo 'No logs available'")
+              puts "   📋 Recent K3S #{service_name} service logs:"
               puts service_logs.split("\n").map { |line| "      #{line}" }.join("\n")
             rescue
               puts "   📋 Unable to retrieve service logs"

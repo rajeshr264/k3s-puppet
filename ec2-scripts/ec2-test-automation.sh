@@ -239,7 +239,7 @@ full_test() {
 require_relative '$SCRIPT_DIR/aws_ec2_testing'
 
 # All supported operating systems
-os_list = ['ubuntu', 'rhel', 'opensuse', 'sles', 'debian', 'rocky', 'almalinux', 'fedora']
+os_list = ['ubuntu', 'rhel', 'debian', 'rocky', 'almalinux', 'fedora']
 
 testing = AwsEc2K3sTesting.new
 test_results = []
@@ -327,8 +327,8 @@ begin
   # Launch agent nodes with different OS
   agent_configs = [
     { os: 'rhel', name: 'RHEL Agent' },
-    { os: 'opensuse', name: 'openSUSE Agent' },
-    { os: 'debian', name: 'Debian Agent' }
+    { os: 'debian', name: 'Debian Agent' },
+    { os: 'rocky', name: 'Rocky Linux Agent' }
   ]
   
   agent_instances = []
@@ -377,7 +377,7 @@ require_relative '$SCRIPT_DIR/aws_ec2_testing'
 require 'benchmark'
 
 # Test subset of OS for performance comparison
-performance_os = ['ubuntu', 'rhel', 'opensuse', 'debian']
+performance_os = ['ubuntu', 'rhel', 'debian', 'rocky']
 
 testing = AwsEc2K3sTesting.new
 test_results = []

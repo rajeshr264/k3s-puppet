@@ -286,6 +286,77 @@ aws ec2 describe-images --image-ids ami-0f6d76bf212f00b86 --region us-west-2
 aws ec2 describe-instances --instance-ids i-1234567890abcdef0
 ```
 
+#### 5. Instance Connection Issues
+```bash
+# Check security group allows SSH (port 22)
+aws ec2 describe-security-groups --group-ids sg-xxxxxxxxx
+
+# Verify key pair permissions
+chmod 400 ~/.ssh/your-key.pem
+```
+
+#### 6. K3S Service Not Starting
+```bash
+# Check service status
+sudo systemctl status k3s
+sudo journalctl -u k3s --no-pager
+
+# Common fixes
+sudo systemctl daemon-reload
+sudo systemctl restart k3s
+```
+
+#### 7. RPM Lock Issues on RHEL-Based Systems
+
+**Problem**: Agent installation fails with "can't create transaction lock" error
+```
+error: can't create transaction lock on /var/lib/rpm/.rpm.lock (Resource temporarily unavailable)
+```
+
+**Root Cause**: Multiple package managers running simultaneously, often due to:
+- AWS Systems Manager agent running automatic updates
+- Cloud-init installing packages
+- Multiple yum/dnf processes
+
+**Solution 1**: Use the dedicated fix script
+```bash
+# On the agent node
+curl -O https://raw.githubusercontent.com/YOUR_USERNAME/k3s-puppet/main/ec2-scripts/fix-agent-rpm-lock.sh
+chmod +x fix-agent-rpm-lock.sh
+sudo ./fix-agent-rpm-lock.sh <server_ip> <token>
+```
+
+**Solution 2**: Manual RPM lock cleanup
+```bash
+# Wait for existing operations to complete
+while sudo fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; do
+    echo "Waiting for RPM lock..."
+    sleep 10
+done
+
+# Kill hanging processes
+sudo pkill -f "yum|dnf|rpm" 2>/dev/null || true
+
+# Stop conflicting services temporarily
+sudo systemctl stop amazon-ssm-agent packagekit 2>/dev/null || true
+
+# Remove stale lock files
+sudo rm -f /var/lib/rpm/.rpm.lock /var/lib/rpm/.dbenv.lock
+
+# Install K3S
+curl -sfL https://get.k3s.io | K3S_URL=https://<server_ip>:6443 K3S_TOKEN=<token> sh -
+
+# Restart services
+sudo systemctl start amazon-ssm-agent packagekit 2>/dev/null || true
+```
+
+**Solution 3**: Skip SELinux package if persistent issues
+```bash
+curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_SELINUX_RPM=true K3S_URL=https://<server_ip>:6443 K3S_TOKEN=<token> sh -
+```
+
+#### 8. Token Extraction Issues
+
 ### Debug Mode
 
 Enable verbose logging for troubleshooting:

@@ -37,6 +37,24 @@ class k3s_cluster::install {
     require => File['/var/lib/rancher'],
   }
 
+  # Handle RPM lock issues on RPM-based systems before installation
+  if $facts['os']['family'] in ['RedHat', 'Suse'] {
+    file { '/tmp/rpm-lock-handler.sh':
+      ensure  => file,
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0755',
+      content => epp('k3s_cluster/rpm-lock-handler.sh.epp'),
+    }
+
+    exec { 'handle-rpm-locks':
+      command => '/tmp/rpm-lock-handler.sh',
+      path    => ['/bin', '/usr/bin', '/sbin', '/usr/sbin'],
+      require => File['/tmp/rpm-lock-handler.sh'],
+      before  => [Package['wget'], Package['curl']],
+    }
+  }
+
   case $k3s_cluster::installation_method {
     'script': {
       # Ensure wget is installed (preferred method)
@@ -65,17 +83,23 @@ class k3s_cluster::install {
         require => Exec['download_k3s_script'],
       }
 
-      # Install using the official K3S installation script
+      # Create enhanced installation script with RPM lock handling and retry logic
+      file { '/tmp/k3s-install-with-retry.sh':
+        ensure  => file,
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0755',
+        content => epp('k3s_cluster/k3s-install-with-retry.sh.epp'),
+        require => File['/tmp/k3s-install.sh'],
+      }
+
+      # Install using the enhanced K3S installation script with retry logic
       exec { 'install_k3s':
-        command     => 'sh /tmp/k3s-install.sh',
-        path        => ['/usr/bin', '/bin', '/usr/local/bin'],
-        creates     => $k3s_cluster::params::binary_path,
-        environment => [
-          "INSTALL_K3S_VERSION=${k3s_cluster::version}",
-          "INSTALL_K3S_EXEC=${k3s_cluster::node_type}",
-        ],
-        timeout     => 300,
-        require     => File['/tmp/k3s-install.sh'],
+        command => '/tmp/k3s-install-with-retry.sh',
+        path    => ['/usr/bin', '/bin', '/usr/local/bin', '/sbin', '/usr/sbin'],
+        creates => $k3s_cluster::params::binary_path,
+        timeout => 900,  # Increased timeout for retry logic
+        require => File['/tmp/k3s-install-with-retry.sh'],
       }
     }
     'binary': {
